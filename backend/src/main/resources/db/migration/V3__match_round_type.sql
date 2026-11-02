@@ -1,0 +1,3 @@
+ALTER TABLE match_round
+  ADD COLUMN round_type VARCHAR(20) NOT NULL DEFAULT 'NORMAL' AFTER round_no;
+

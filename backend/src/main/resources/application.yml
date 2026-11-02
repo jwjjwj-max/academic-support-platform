@@ -1,0 +1,70 @@
+spring:
+  application:
+    name: academic-support-platform
+  profiles:
+    default: dev
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/academic_support?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false}
+    username: ${DB_USERNAME:academic_support}
+    password: ${DB_PASSWORD:change-me}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  jackson:
+    default-property-inclusion: non_null
+    time-zone: Asia/Shanghai
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 25MB
+
+server:
+  port: ${SERVER_PORT:8080}
+  servlet:
+    context-path: /api
+  forward-headers-strategy: framework
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+app:
+  security:
+    jwt-secret: ${JWT_SECRET:dev-only-secret-key-change-before-deployment-2026}
+    access-token-minutes: ${JWT_ACCESS_TOKEN_MINUTES:120}
+  bootstrap:
+    owner-login: ${BOOTSTRAP_OWNER_LOGIN:}
+    owner-password: ${BOOTSTRAP_OWNER_PASSWORD:}
+    owner-display-name: ${BOOTSTRAP_OWNER_DISPLAY_NAME:系统负责人}
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173}
+  storage:
+    provider: ${STORAGE_PROVIDER:local}
+    direct-upload: ${STORAGE_DIRECT_UPLOAD:false}
+    direct-read: ${STORAGE_DIRECT_READ:false}
+    cos:
+      secret-id: ${COS_SECRET_ID:}
+      secret-key: ${COS_SECRET_KEY:}
+      bucket: ${COS_BUCKET:}
+      region: ${COS_REGION:}
+    private-root: ${PRIVATE_FILE_ROOT:./data/private}
+    photo-max-bytes: ${PHOTO_MAX_BYTES:5242880}
+    grade-max-bytes: ${GRADE_MAX_BYTES:20971520}
+    moral-max-bytes: ${MORAL_MAX_BYTES:20971520}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never

@@ -1,0 +1,59 @@
+# Build outputs
+backend/target/
+frontend/dist/
+frontend/node_modules/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+backend/src/main/resources/application-local.yml
+/密钥/
+
+# Runtime storage
+/storage/
+logs/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Codex inspection artifacts
+.codex-tmp/
+data/private/
+backend/target/test-private/
+transcript-preview.png
+
+# Private workspace, operational records, and student attachments
+.codex-work/
+.deploy-staging/
+.obsidian/
+/outputs/
+/原型图修改建议/
+**/data/private/
+/*.xlsx
+/*.xls
+/*.csv
+/*.docx
+/*.png
+/*.svg
+docs/*.png
+prototype/*.png
+docs/*-20261102.md
+
+# Caches, archives, local keys, and logs
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+*.log
+*.sql.gz
+*.tar.gz
+*.zip
+*.bak
+*.pem
+*.key
+*.p12
+*.pfx

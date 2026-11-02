@@ -1,0 +1,18 @@
+{
+  "version": "2.0",
+  "statement": [
+    {
+      "effect": "allow",
+      "action": [
+        "cos:GetBucket",
+        "cos:GetObject",
+        "cos:HeadObject",
+        "cos:PutObject",
+        "cos:DeleteObject"
+      ],
+      "resource": [
+        "qcs::cos:ap-shanghai:uid/1250000000:examplebucket-1250000000/*"
+      ]
+    }
+  ]
+}

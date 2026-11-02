@@ -1,0 +1,10 @@
+[Unit]
+Description=Academic support verified MySQL backup to private LHCOS
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/academic-support/tools/backup.sh
+TimeoutStartSec=1200
+UMask=0077
