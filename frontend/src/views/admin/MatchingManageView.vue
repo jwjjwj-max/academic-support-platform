@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import MatchingEvidencePanel from '@/components/MatchingEvidencePanel.vue'
+import MatchingExclusionsPanel from '@/components/MatchingExclusionsPanel.vue'
 import MatchingRoundPanel from '@/components/MatchingRoundPanel.vue'
 import MatchingRulesEditor from '@/components/MatchingRulesEditor.vue'
 import { apiErrorMessage, http } from '@/services/http'
@@ -10,7 +11,7 @@ import type {
 } from '@/types/api'
 import { labelOf } from '@/utils/labels'
 import { canGenerateLocalRematch, canGenerateMatching, canOperateRound } from '@/utils/matching-stage'
-import { selectedPairs } from '@/utils/matching-workbench'
+import { matchKindLabel, selectedPairs } from '@/utils/matching-workbench'
 
 const tabs = [
   { id: 'rules', title: '规则配置' }, { id: 'evidence', title: 'DeepSeek 分析' },
@@ -32,6 +33,7 @@ const period = computed(() => periods.value.find(item => item.id === periodId.va
 const base = computed(() => `/admin/matching/periods/${periodId.value}/workspace`)
 const published = computed(() => rounds.value.some(round => round.status === 'PUBLISHED'))
 const draft = computed(() => rounds.value.find(round => round.status === 'DRAFT'))
+const recordedRounds = computed(() => rounds.value.filter(round => round.status !== 'DRAFT'))
 const canEditRules = computed(() => !published.value && ['REVIEW', 'MATCHING'].includes(period.value?.status ?? ''))
 const canEditEvidence = computed(() => ['REVIEW', 'MATCHING', 'CONFIRMATION'].includes(period.value?.status ?? ''))
 const canPreview = computed(() => canGenerateMatching(period.value?.status) && !published.value)
@@ -53,7 +55,7 @@ async function refresh() {
     fetchData<MatchingWorkspace>(path), fetchData<MatchingRound[]>(`${path}/rounds`),
   ])
   const latest = list.find(round => round.status === 'DRAFT') ?? list.find(round => round.status === 'PUBLISHED')
-  const last = latest && list.find(round => round.roundNo < latest.roundNo)
+  const last = latest?.status === 'DRAFT' ? list.find(round => round.roundNo < latest.roundNo) : undefined
   const [active, compare] = await Promise.all([
     latest ? fetchData<MatchingRoundView>(`${path}/rounds/${latest.id}`) : undefined,
     last ? fetchData<MatchingRoundView>(`${path}/rounds/${last.id}`) : undefined,
@@ -96,12 +98,22 @@ async function operate(action: () => Promise<void>) {
   }
 }
 
-function saveRules(policy: MatchingPolicy) {
+function savePolicy(policy: MatchingPolicy, message: string) {
   return operate(async () => {
     await http.put(`${base.value}/policy`, { revision: workspace.value?.settings.revision, policy })
     await refresh()
-    success.value = '本期规则已保存。'
+    success.value = message
   })
+}
+
+function saveRules(rules: Pick<MatchingPolicy, 'freshmanGrade' | 'rules'>) {
+  const policy = workspace.value?.settings.policy
+  if (policy && canEditRules.value) return savePolicy({ ...policy, ...rules }, '本期规则已保存。')
+}
+
+function saveExternalPermission(allowExternalAnalysis: boolean) {
+  const policy = workspace.value?.settings.policy
+  if (policy && canEditRules.value) return savePolicy({ ...policy, allowExternalAnalysis }, '本期外发设置已保存。')
 }
 
 function analyze(students: MatchingStudent[]) {
@@ -251,14 +263,26 @@ onMounted(async () => {
   <div v-if="progress" class="notice" role="status">{{ progress }}</div>
   <div v-if="loading" class="loading-state">正在加载匹配工作台…</div>
   <div v-else-if="workspace">
-    <MatchingRulesEditor v-show="tab === 'rules'" :settings="workspace.settings" :editable="canEditRules" :busy="busy" @save="saveRules" />
-    <MatchingEvidencePanel v-show="tab === 'evidence'" :workspace="workspace" :provider="provider" :editable="canEditEvidence" :busy="busy"
-      @analyze="analyze" @review="review" @exclude="exclude" @save-key="saveKey" @clear-key="clearKey" @test-key="testKey" />
-    <div v-if="tab === 'trial'">
+    <section v-show="tab === 'rules'" aria-label="规则配置" data-panel="rules">
+      <MatchingRulesEditor :settings="workspace.settings" :editable="canEditRules" :busy="busy" @save="saveRules" />
+      <MatchingExclusionsPanel :students="workspace.students" :exclusions="workspace.exclusions" :editable="canEditEvidence" :busy="busy" @save="exclude" />
+    </section>
+    <section v-show="tab === 'evidence'" aria-label="DeepSeek 分析" data-panel="evidence">
+      <MatchingEvidencePanel :workspace="workspace" :provider="provider" :editable="canEditEvidence"
+        :permission-editable="canEditRules" :busy="busy" @analyze="analyze" @review="review"
+        @save-permission="saveExternalPermission" @save-key="saveKey" @clear-key="clearKey" @test-key="testKey" />
+    </section>
+    <section v-if="tab === 'trial'" aria-label="试算与发布" data-panel="trial">
       <div class="notice">
-        <strong>先试算，再人工检查并发布</strong>
-        <p v-if="!canPreview && !canRematch && !current">本期可在报名审核阶段准备规则和依据，进入匹配阶段后生成草稿。</p>
-        <p v-else>所有方案按同一套入池、占用与排除规则校验。进入双方确认阶段后可处理拒绝并局部重匹配。</p>
+        <template v-if="current?.round.status === 'PUBLISHED'">
+          <strong>第 {{ current.round.roundNo }} 轮已发布 · {{ selectedPairs(current).length }} 组</strong>
+          <p>{{ canRematch ? '学生拒绝后可发起局部重新匹配。' : '已发布方案可在轮次记录中查看。' }}</p>
+        </template>
+        <template v-else>
+          <strong>先试算，再人工检查并发布</strong>
+          <p v-if="!canPreview && !canRematch && !current">本期可在报名审核阶段准备规则和依据，进入匹配阶段后生成草稿。</p>
+          <p v-else>核对组合和待安排名单后，可在草稿里调整并确认发布。</p>
+        </template>
       </div>
       <div class="workbench-tabs">
         <button v-if="canPreview" class="button secondary" :disabled="busy" @click="preview">{{ workspace.settings.revision ? '生成试算' : '先保存本期规则' }}</button>
@@ -267,23 +291,37 @@ onMounted(async () => {
         <button v-if="draftOpen" class="button primary" :disabled="busy || !canPublish" @click="publish">复核并确认发布 {{ selectedPairs(current).length }} 组</button>
       </div>
       <div v-if="stale && draftOpen" class="notice warning" role="status">规则或依据已更新。请重新试算后再调整和发布。局部重匹配草稿可放弃后重算。</div>
-      <MatchingRoundPanel v-if="current" :view="current" :previous="previous" :students="workspace.students" :editable="editable" :busy="busy" @adjust="adjust" />
-    </div>
-    <div v-if="tab === 'history'">
+      <MatchingRoundPanel v-if="current?.round.status === 'DRAFT'" :view="current" :previous="previous" :students="workspace.students" :editable="editable" :busy="busy" @adjust="adjust" />
+    </section>
+    <section v-if="tab === 'history'" aria-label="轮次记录" data-panel="history">
       <section class="card">
         <header><div><h2>轮次记录</h2><p>保留历史方案、使用的规则和人工调整。</p></div></header>
         <div class="card-body">
-          <p v-if="!rounds.length" class="muted">还没有匹配轮次。</p>
-          <div v-for="round in rounds" :key="round.id" class="history-row">
+          <p v-if="!recordedRounds.length" class="muted">暂无已发布或已替换的轮次。当前草稿在「试算与发布」中查看。</p>
+          <div v-for="round in recordedRounds" :key="round.id" class="history-row">
             <div><strong>第 {{ round.roundNo }} 轮</strong> · {{ round.roundType === 'LOCAL_REMATCH' ? '局部重匹配' : '普通匹配' }}
-              · {{ round.status === 'DRAFT' ? '草稿' : round.status === 'PUBLISHED' ? '已发布' : '已被替换' }}</div>
+              · {{ round.status === 'PUBLISHED' ? '已发布' : '已被替换' }}</div>
             <button class="button ghost small" :disabled="busy" @click="inspect(round)">查看方案</button>
           </div>
         </div>
       </section>
-      <MatchingRulesEditor v-if="historical?.policy" :settings="{ policy: historical.policy, revision: historical.round.workspaceRevision ?? 0 }" :editable="false" :busy="false" />
-      <MatchingRoundPanel v-if="historical" :view="historical" :students="workspace.students" :editable="false" :busy="busy" />
-    </div>
+      <section v-if="historical?.policy" :key="`rules-${historical.round.id}`" class="card">
+        <details class="card-body">
+          <summary>第 {{ historical.round.roundNo }} 轮规则快照</summary>
+          <p>本轮大一入学年 · {{ historical.policy.freshmanGrade }}</p>
+          <ol class="compact-list">
+            <li v-for="rule in historical.policy.rules" :key="rule.kind">
+              <strong>{{ matchKindLabel(rule.kind) }}</strong>
+              <template v-if="rule.enabled"> · {{ rule.kind === 'PEER' ? '每个方向' : '' }}至少覆盖 {{ rule.minimumCoverage }} 门 · {{ rule.maximumPairs == null ? '组数不限' : `最多 ${rule.maximumPairs} 组` }}</template>
+              <template v-else> · 未启用</template>
+              <small v-if="rule.enabled && rule.kind === 'REGULAR'">{{ rule.allowOlderNavigator ? '允许更高年级领航' : '仅同年级领航' }} · {{ rule.requireHigherGpa ? '要求领航者绩点更高' : '未设置绩点差门槛' }}</small>
+            </li>
+          </ol>
+        </details>
+      </section>
+      <MatchingRoundPanel v-if="historical" :key="historical.round.id" :view="historical" :students="workspace.students"
+        historical :editable="false" :busy="busy" />
+    </section>
   </div>
 </template>
 

@@ -4,11 +4,13 @@ import type { MatchingPolicy, MatchingPolicyVersion } from '@/types/api'
 import { matchKindLabel } from '@/utils/matching-workbench'
 
 const props = defineProps<{ settings: MatchingPolicyVersion; editable: boolean; busy: boolean }>()
-const emit = defineEmits<{ save: [policy: MatchingPolicy] }>()
-const draft = ref<MatchingPolicy>()
+type RulesDraft = Pick<MatchingPolicy, 'freshmanGrade' | 'rules'>
+const emit = defineEmits<{ save: [rules: RulesDraft] }>()
+const draft = ref<RulesDraft>()
 
-watch(() => props.settings.policy, policy => {
-  draft.value = { ...policy, rules: policy.rules.map(rule => ({ ...rule })) }
+watch(() => props.settings.policy, (policy, previous) => {
+  if (policy.freshmanGrade === previous?.freshmanGrade && JSON.stringify(policy.rules) === JSON.stringify(previous.rules)) return
+  draft.value = { freshmanGrade: policy.freshmanGrade, rules: policy.rules.map(rule => ({ ...rule })) }
 }, { immediate: true })
 
 function move(index: number, direction: number) {
@@ -32,7 +34,6 @@ function save() {
     <form class="card-body" @submit.prevent="save">
       <div class="form-grid">
         <label>本期大一入学年<input v-model.number="draft.freshmanGrade" type="number" min="2000" max="2100" required :disabled="!editable || busy" /></label>
-        <label class="risk-confirm"><input v-model="draft.allowExternalAnalysis" type="checkbox" :disabled="!editable || busy" />已确认本期允许将审核后的脱敏学业自述提交给 DeepSeek</label>
       </div>
       <p class="muted">顺序靠前的规则优先获得名额。系统在所有合格候选中统一分配，同等覆盖人数时优先覆盖更多学习需求。</p>
       <fieldset v-for="(rule, index) in draft.rules" :key="rule.kind" class="rule-fieldset" :disabled="!editable || busy">

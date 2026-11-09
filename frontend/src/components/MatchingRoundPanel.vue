@@ -8,11 +8,15 @@ const props = defineProps<{
   view: MatchingRoundView
   previous?: MatchingRoundView
   students: MatchingStudent[]
+  historical?: boolean
   editable: boolean
   busy: boolean
 }>()
 const emit = defineEmits<{ adjust: [data: { revision: number; removeId?: number; selectId?: number; reason: string }] }>()
 const filter = ref<'selected' | 'waiting' | 'diff'>('selected')
+const resultTabs = computed(() => ([
+  { id: 'selected', text: '方案组合' }, { id: 'waiting', text: '待安排' }, { id: 'diff', text: '与上轮对比' },
+] as const).filter(entry => !props.historical || entry.id !== 'diff'))
 const editing = ref<{ pair?: MatchCandidate; student?: MatchingStudent }>()
 const choice = ref<number | 'dissolve' | ''>('')
 const reason = ref('')
@@ -77,6 +81,7 @@ function namesForCandidateIds(ids: number[]) {
 }
 
 function pendingReason(id: number) {
+  if (props.historical) return '该轮未安排'
   if (compatible.value.get(id)?.length) return '有合格候选，搭档或规则名额已被占用'
   const student = people.value.get(id)
   if (student && student.grade === props.view.policy?.freshmanGrade && !student.evidence) return '无合格候选，可先复核互助能力或领航科目'
@@ -97,7 +102,7 @@ function pendingReason(id: number) {
         <div v-if="view.policy"><strong>{{ waiting.length }} 人</strong><small>待安排</small></div>
       </div>
       <div class="table-actions round-actions" aria-label="结果视图">
-        <button v-for="entry in [{ id: 'selected', text: '方案组合' }, { id: 'waiting', text: '待安排' }, { id: 'diff', text: '与上轮对比' }] as const"
+        <button v-for="entry in resultTabs"
           :key="entry.id" class="button small" :class="filter === entry.id ? 'secondary' : 'ghost'" :aria-pressed="filter === entry.id"
           :disabled="entry.id === 'waiting' && !view.policy" @click="filter = entry.id">{{ entry.text }}</button>
       </div>
@@ -129,7 +134,7 @@ function pendingReason(id: number) {
               </div>
             </div>
             <ul v-else class="compact-list"><li v-for="(detail, key) in pair.scoreDetail" :key="key">{{ labelOf(String(key)) }} · {{ detail.score }}/{{ detail.max }}<small>{{ detail.explanation }}</small></li></ul>
-            <div v-if="people.get(pair.navigatorApplicationId) && people.get(pair.climberApplicationId)" class="grid two basis">
+            <div v-if="!historical && people.get(pair.navigatorApplicationId) && people.get(pair.climberApplicationId)" class="grid two basis">
               <div v-for="id in members(pair)" :key="id"><strong>{{ personName(id) }}的报名自述</strong><p>{{ people.get(id)?.statement }}</p></div>
             </div>
           </details>
