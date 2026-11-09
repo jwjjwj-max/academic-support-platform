@@ -54,8 +54,9 @@ public class MatchingController {
     @PreAuthorize("hasRole('ADMIN')")
     public ApiResponse<List<MatchCandidateResponse>> publish(@AuthenticationPrincipal AuthenticatedUser actor,
                                                              @PathVariable Long roundId,
+                                                             @RequestParam(required = false) Integer revision,
                                                              HttpServletRequest request) {
-        return ApiResponse.success(service.publish(actor, roundId, request));
+        return ApiResponse.success(service.publish(actor, roundId, revision, request));
     }
 
     @GetMapping("/matching/mine")

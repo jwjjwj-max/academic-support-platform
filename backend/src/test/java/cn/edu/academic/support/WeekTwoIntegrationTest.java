@@ -13,10 +13,14 @@ import cn.edu.academic.support.application.service.ApplicationService;
 import cn.edu.academic.support.common.exception.BusinessException;
 import cn.edu.academic.support.matching.dto.MatchCandidateResponse;
 import cn.edu.academic.support.matching.dto.MatchDecisionRequest;
+import cn.edu.academic.support.matching.dto.MatchingEvidence;
+import cn.edu.academic.support.matching.dto.MatchingPolicy;
 import cn.edu.academic.support.matching.mapper.MatchCandidateMapper;
 import cn.edu.academic.support.matching.mapper.SupportPairMapper;
 import cn.edu.academic.support.matching.model.MatchCandidate;
 import cn.edu.academic.support.matching.service.MatchingService;
+import cn.edu.academic.support.matching.service.MatchingWorkspace;
+import cn.edu.academic.support.matching.service.DeepSeekMatchingClient;
 import cn.edu.academic.support.period.mapper.ActivityPeriodMapper;
 import cn.edu.academic.support.period.dto.PeriodStatusRequest;
 import cn.edu.academic.support.period.dto.PeriodTransitionPreview;
@@ -31,8 +35,10 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.mock.web.MockHttpServletRequest;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -43,12 +49,17 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.verify;
 
-@SpringBootTest
+@SpringBootTest(properties = "MATCHING_ENCRYPTION_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 @ActiveProfiles("test")
 @Transactional
 class WeekTwoIntegrationTest {
     @Autowired MatchingService matchingService;
+    @Autowired MatchingWorkspace workspace;
+    @Autowired JdbcTemplate jdbc;
+    @MockitoSpyBean DeepSeekMatchingClient deepSeek;
     @Autowired ApplicationService applicationService;
     @Autowired PeriodService periodService;
     @Autowired UserAccountMapper userMapper;
@@ -357,6 +368,112 @@ class WeekTwoIntegrationTest {
         matchingService.publish(admin, localAlternative.roundId(), request());
         assertBusinessError(() -> matchingService.rematch(admin, period.getId(), request()), "NO_PENDING_REJECTION");
         assertThat(candidateMapper.selectById(rejectedCandidate.id()).getStatus()).isEqualTo("REJECTED");
+    }
+
+    @Test
+    void workbenchOptimizesMutualHelpAndAuditsConflictingManualChanges() {
+        AuthenticatedUser admin = actor(createUser("workspace-admin", "ADMIN", "匹配管理员"));
+        ActivityPeriod period = createPeriod(admin.id(), "MATCHING", "互助工作台");
+        long periodId = period.getId();
+        workspace.savePolicy(admin, periodId, 0, MatchingPolicy.defaults(2026), request());
+        var a = workbenchStudent(periodId, "peer-a", "甲同学", "英语听说");
+        var b = workbenchStudent(periodId, "peer-b", "乙同学", "C语言");
+        var c = workbenchStudent(periodId, "peer-c", "丙同学", "C语言");
+        var d = workbenchStudent(periodId, "peer-d", "丁同学", "英语听说");
+        var e = workbenchStudent(periodId, "peer-e", "戊同学", "Python");
+        var helper = createParticipant(periodId, "peer-helper", "领航测试", "NAVIGATOR", 2025,
+                new BigDecimal("3.50"), "Python", "helper");
+        evidence(admin, period, a, List.of("线性代数"), "C语言程序设计");
+        evidence(admin, period, b, List.of("Python"), "英语听说");
+        evidence(admin, period, c, List.of(), "线性代数");
+        evidence(admin, period, d, List.of(), "Python");
+
+        int revision = workspace.view(periodId).settings().revision();
+        var draft = matchingService.preview(admin, periodId, revision, null, null, request());
+        long roundId = draft.round().id();
+        assertThat(draft.candidates().stream().filter(pair -> "SELECTED".equals(pair.status())))
+                .extracting(pair -> List.of(pair.navigatorApplicationId(), pair.climberApplicationId()))
+                .containsExactlyInAnyOrder(List.of(a.getId(), c.getId()), List.of(b.getId(), d.getId()), List.of(helper.getId(), e.getId()));
+        var ac = draft.candidates().stream().filter(pair -> pair.navigatorApplicationId().equals(a.getId())
+                && pair.climberApplicationId().equals(c.getId())).findFirst().orElseThrow();
+        var ab = draft.candidates().stream().filter(pair -> pair.navigatorApplicationId().equals(a.getId())
+                && pair.climberApplicationId().equals(b.getId())).findFirst().orElseThrow();
+        assertThat(ac.coverage()).containsKeys("firstToSecond", "secondToFirst");
+        assertThat(ac.totalScore()).isNull();
+        var adjusted = matchingService.adjust(admin, roundId, 0, ac.id(), ab.id(), "核实时间后换组", request());
+        assertThat(adjusted.candidates().stream().filter(pair -> "SELECTED".equals(pair.status()))).hasSize(2);
+        assertThat(adjusted.candidates().stream().filter(pair -> Boolean.TRUE.equals(pair.manuallySelected())))
+                .extracting(MatchCandidateResponse::id).containsExactly(ab.id());
+        assertThat(adjusted.adjustments()).singleElement().satisfies(entry -> {
+            assertThat(entry.reason()).isEqualTo("核实时间后换组");
+            assertThat(entry.before()).contains(ac.id());
+            assertThat(entry.after()).contains(ab.id()).doesNotContain(ac.id());
+        });
+        assertBusinessError(() -> matchingService.adjust(admin, roundId, 0, ab.id(), null, "旧弹窗", request()),
+                "MATCHING_VERSION_CONFLICT");
+        workspace.setExclusion(admin, periodId, b.getId(), a.getId(), true, "已核实私下约组", request());
+        assertBusinessError(() -> matchingService.publish(admin, roundId, 1, request()), "MATCHING_VERSION_CONFLICT");
+
+        var updated = matchingService.preview(admin, periodId, revision + 1, roundId, 1, request());
+        assertThat(matchingService.roundView(periodId, roundId).round().status()).isEqualTo("SUPERSEDED");
+        assertThat(updated.candidates()).noneMatch(pair -> pair.navigatorApplicationId().equals(a.getId()) && pair.climberApplicationId().equals(b.getId()));
+        var pair = updated.candidates().stream().filter(item -> "SELECTED".equals(item.status())
+                && "PEER".equals(item.matchKind())).findFirst().orElseThrow();
+        matchingService.publish(admin, updated.round().id(), 0, request());
+        period.setStatus("CONFIRMATION");
+        periodMapper.updateById(period);
+        assertThat(matchingService.mine(pair.navigatorUserId())).singleElement().satisfies(item -> {
+            assertThat(item.coverage()).isNull();
+            assertThat(item.matchKind()).isEqualTo("PEER");
+        });
+        matchingService.decide(actor(userMapper.selectById(pair.navigatorUserId())), pair.id(),
+                new MatchDecisionRequest("CONFIRMED", null), request());
+        matchingService.decide(actor(userMapper.selectById(pair.climberUserId())), pair.id(),
+                new MatchDecisionRequest("CONFIRMED", null), request());
+        assertThat(jdbc.queryForObject("SELECT match_kind FROM support_pair WHERE source_candidate_id=?", String.class, pair.id()))
+                .isEqualTo("PEER");
+    }
+
+    @Test
+    void sendsOnlyApprovedPreviewAndCachesEvidenceWithoutExposingKey() {
+        AuthenticatedUser admin = actor(createUser("workspace-provider-admin", "ADMIN", "提取测试管理员"));
+        ActivityPeriod period = createPeriod(admin.id(), "REVIEW", "脱敏与缓存");
+        var student = workbenchStudent(period.getId(), "provider-a", "测试学生", "线性代数");
+        student.setStatementText("我需要线性代数辅导。可以提供编程入门帮助。已经和某同学约好分到一组。我的微信是 demo123456。");
+        applicationMapper.updateById(student);
+        String fake = "sk-synthetic-test-key-8421";
+        assertThat(deepSeek.save(admin, fake, request()).suffix()).isEqualTo("8421");
+        assertThat(jdbc.queryForObject("SELECT ciphertext FROM matching_provider WHERE id=1", String.class)).doesNotContain(fake);
+        deepSeek.save(admin, fake, request());
+        var view = workspace.view(period.getId());
+        var record = view.students().getFirst();
+        assertThat(record.pairingClue()).isTrue();
+        assertThat(record.externalPreview()).isEqualTo("我需要线性代数辅导。可以提供编程入门帮助");
+        assertBusinessError(() -> workspace.analyze(admin, period.getId(), student.getId(), record.revision(),
+                record.externalPreview(), request()), "MATCHING_EXTERNAL_ANALYSIS_DISABLED");
+        var defaults = view.settings().policy();
+        workspace.savePolicy(admin, period.getId(), 0, new MatchingPolicy(2026, true, defaults.rules()), request());
+        assertBusinessError(() -> workspace.analyze(admin, period.getId(), student.getId(), record.revision(),
+                student.getStatementText(), request()), "MATCHING_PREVIEW_CHANGED");
+        var facts = new MatchingEvidence(List.of(new MatchingEvidence.Topic("线性代数", null, "我需要线性代数辅导")),
+                List.of(new MatchingEvidence.Topic("编程入门", null, "可以提供编程入门帮助")));
+        doReturn(facts).when(deepSeek).extract(record.externalPreview());
+        assertThat(workspace.analyze(admin, period.getId(), student.getId(), record.revision(), record.externalPreview(), request()).facts())
+                .isEqualTo(facts);
+        workspace.analyze(admin, period.getId(), student.getId(), record.revision(), record.externalPreview(), request());
+        verify(deepSeek).extract(record.externalPreview());
+    }
+
+    private ParticipationApplication workbenchStudent(long periodId, String login, String name, String subject) {
+        return createParticipant(periodId, login, name, "CLIMBER", 2026, BigDecimal.ZERO, subject, "fixture");
+    }
+
+    private void evidence(AuthenticatedUser admin, ActivityPeriod period, ParticipationApplication app, List<String> needs, String offer) {
+        app.setStatementText("可以辅导" + offer + "。" + needs.stream().map(course -> "需要辅导" + course).collect(java.util.stream.Collectors.joining("。")));
+        applicationMapper.updateById(app);
+        var facts = new MatchingEvidence(needs.stream().map(course -> new MatchingEvidence.Topic(course, null, "需要辅导" + course)).toList(),
+                List.of(new MatchingEvidence.Topic(offer, null, "可以辅导" + offer)));
+        workspace.reviewEvidence(admin, period.getId(), app.getId(), 0, workspace.view(period.getId()).settings().revision(), facts, request());
     }
 
     private ParticipationApplication createParticipant(Long periodId, String login, String name, String role, int grade,

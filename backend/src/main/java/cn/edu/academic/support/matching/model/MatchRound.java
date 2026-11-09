@@ -17,6 +17,8 @@ public class MatchRound {
     private String roundType;
     private String status;
     private String weightSnapshot;
+    private Integer policyRevision;
+    private Integer draftRevision;
     private Long createdBy;
     private LocalDateTime createdAt;
     private LocalDateTime publishedAt;

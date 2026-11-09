@@ -8,7 +8,7 @@ public record PairDetailResponse(
         LocalDateTime confirmedAt, LocalDateTime completedAt, String acceptanceNote,
         LocalDateTime endedAt, String endReason, Integer photoMin, Integer photoMax,
         Member navigator, Member climber, List<Photo> photos, List<Reflection> reflections,
-        boolean canSubmit, boolean canUploadPhoto, boolean canSubmitReflection, boolean canAccept) {
+        boolean canSubmit, boolean canUploadPhoto, boolean canSubmitReflection, boolean canAccept, String matchKind) {
     public record Member(Long userId, String name, String role) {}
     public record Photo(Long id, Long uploaderId, String uploaderName, String originalFilename,
                         String mimeType, Long fileSize, String description, String status,

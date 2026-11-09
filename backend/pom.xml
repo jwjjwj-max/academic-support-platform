@@ -23,6 +23,11 @@
 
     <dependencies>
         <dependency>
+            <groupId>org.ojalgo</groupId>
+            <artifactId>ojalgo</artifactId>
+            <version>57.3.1</version>
+        </dependency>
+        <dependency>
             <groupId>com.qcloud</groupId>
             <artifactId>cos_api</artifactId>
             <version>5.6.247</version>

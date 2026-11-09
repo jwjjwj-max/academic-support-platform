@@ -73,6 +73,10 @@ class WeekOneIntegrationTest {
                 .andExpect(status().isForbidden());
         mvc.perform(get("/owner/admins").header("Authorization", bearer(token)))
                 .andExpect(status().isForbidden());
+        mvc.perform(get("/admin/matching/deepseek").header("Authorization", bearer(token)))
+                .andExpect(status().isForbidden());
+        mvc.perform(get("/admin/matching/periods/1/workspace").header("Authorization", bearer(token)))
+                .andExpect(status().isForbidden());
     }
 
     @Test

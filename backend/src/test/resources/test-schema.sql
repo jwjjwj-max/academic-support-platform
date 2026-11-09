@@ -1,3 +1,7 @@
+DROP TABLE IF EXISTS matching_evidence;
+DROP TABLE IF EXISTS matching_exclusion;
+DROP TABLE IF EXISTS matching_policy;
+DROP TABLE IF EXISTS matching_provider;
 DROP TABLE IF EXISTS storage_upload;
 DROP TABLE IF EXISTS notification_recipient;
 DROP TABLE IF EXISTS notification;
@@ -170,6 +174,8 @@ CREATE TABLE match_round (
   period_id BIGINT NOT NULL,
   round_no INT NOT NULL,
   round_type VARCHAR(20) NOT NULL DEFAULT 'NORMAL',
+  policy_revision INT,
+  draft_revision INT,
   status VARCHAR(20) NOT NULL,
   weight_snapshot VARCHAR(4000) NOT NULL,
   created_by BIGINT NOT NULL,
@@ -186,6 +192,8 @@ CREATE TABLE match_candidate (
   total_score DECIMAL(5,2) NOT NULL,
   score_detail VARCHAR(8000) NOT NULL,
   matched_subjects VARCHAR(2000) NOT NULL,
+  match_kind VARCHAR(24) NOT NULL DEFAULT 'LEGACY',
+  manually_selected BOOLEAN NOT NULL DEFAULT FALSE,
   admin_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
   status VARCHAR(24) NOT NULL,
   navigator_decision VARCHAR(16) NOT NULL DEFAULT 'PENDING',
@@ -220,6 +228,7 @@ CREATE TABLE support_pair (
   navigator_application_id BIGINT NOT NULL,
   climber_application_id BIGINT NOT NULL,
   source_candidate_id BIGINT,
+  match_kind VARCHAR(24) NOT NULL DEFAULT 'LEGACY',
   status VARCHAR(24) NOT NULL DEFAULT 'ACTIVE',
   confirmed_at TIMESTAMP NOT NULL,
   completed_by BIGINT,
@@ -240,6 +249,20 @@ CREATE TABLE pair_photo (
   peer_confirmed_by BIGINT, peer_confirmed_at TIMESTAMP, reviewed_by BIGINT, reviewed_at TIMESTAMP,
   rejection_reason VARCHAR(500), revision_no INT NOT NULL DEFAULT 1, submitted_at TIMESTAMP NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE matching_policy (
+  period_id BIGINT PRIMARY KEY, revision INT NOT NULL, policy_json CLOB NOT NULL
+);
+CREATE TABLE matching_evidence (
+  application_id BIGINT PRIMARY KEY, application_revision INT NOT NULL, facts_json CLOB NOT NULL, reviewed BOOLEAN NOT NULL
+);
+CREATE TABLE matching_exclusion (
+  period_id BIGINT NOT NULL, first_application_id BIGINT NOT NULL, second_application_id BIGINT NOT NULL,
+  reason VARCHAR(500) NOT NULL, PRIMARY KEY (period_id, first_application_id, second_application_id)
+);
+CREATE TABLE matching_provider (
+  id INT PRIMARY KEY, ciphertext VARCHAR(2048) NOT NULL, key_suffix VARCHAR(4) NOT NULL
 );
 
 CREATE TABLE pair_reflection (

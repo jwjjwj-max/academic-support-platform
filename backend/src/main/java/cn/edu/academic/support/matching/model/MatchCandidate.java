@@ -19,6 +19,8 @@ public class MatchCandidate {
     private BigDecimal totalScore;
     private String scoreDetail;
     private String matchedSubjects;
+    private String matchKind;
+    private Boolean manuallySelected;
     private Boolean adminConfirmed;
     private String status;
     private String navigatorDecision;

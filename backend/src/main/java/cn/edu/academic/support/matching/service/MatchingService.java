@@ -5,9 +5,12 @@ import cn.edu.academic.support.application.mapper.ParticipationApplicationMapper
 import cn.edu.academic.support.application.model.ApplicationProfileSnapshot;
 import cn.edu.academic.support.application.model.ParticipationApplication;
 import cn.edu.academic.support.audit.service.AuditService;
+import cn.edu.academic.support.audit.mapper.OperationLogMapper;
+import cn.edu.academic.support.audit.model.OperationLog;
 import cn.edu.academic.support.common.exception.BusinessException;
 import cn.edu.academic.support.matching.dto.MatchCandidateResponse;
 import cn.edu.academic.support.matching.dto.MatchDecisionRequest;
+import cn.edu.academic.support.matching.dto.MatchingPolicy;
 import cn.edu.academic.support.matching.mapper.MatchCandidateMapper;
 import cn.edu.academic.support.matching.mapper.MatchRoundMapper;
 import cn.edu.academic.support.matching.mapper.RejectedMatchPairMapper;
@@ -27,6 +30,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
@@ -48,6 +52,16 @@ public class MatchingService {
     private final ActivityPeriodMapper periodMapper;
     private final ObjectMapper objectMapper;
     private final AuditService auditService;
+    private final MatchingWorkspace workspace;
+    private final OperationLogMapper logMapper;
+
+    public record RoundSummary(long id, int roundNo, String roundType, String status, Integer workspaceRevision,
+                               Integer draftRevision, LocalDateTime createdAt, LocalDateTime publishedAt) {}
+    public record AdjustmentLog(String administrator, String reason, LocalDateTime time,
+                                List<Long> before, List<Long> after) {}
+    public record RoundView(RoundSummary round, MatchingPolicy policy, List<Long> participantIds,
+                            List<MatchCandidateResponse> candidates, List<AdjustmentLog> adjustments) {}
+    private record RuleSnapshot(MatchingPolicy policy, List<Long> participantIds) {}
 
     private static final Map<String, String> SUBJECT_ALIASES = Map.ofEntries(
             Map.entry("高数", "高等数学"), Map.entry("高等数学a", "高等数学"),
@@ -60,17 +74,18 @@ public class MatchingService {
     @Transactional
     public List<MatchCandidateResponse> generate(AuthenticatedUser actor, Long periodId,
                                                  HttpServletRequest request) {
-        ActivityPeriod period = requiredPeriod(periodId);
+        ActivityPeriod period = lockPeriod(periodId);
         if (!"MATCHING".equals(period.getStatus())) {
             throw new BusinessException("PERIOD_NOT_MATCHING", "仅匹配阶段可以运行匹配");
         }
+        if (workspace.policy(period).revision() > 0) throw new BusinessException("MATCHING_WORKSPACE_REQUIRED", "请使用匹配工作台生成试算");
         return generateRound(actor, period, "NORMAL", Set.of(), request);
     }
 
     @Transactional
     public List<MatchCandidateResponse> rematch(AuthenticatedUser actor, Long periodId,
                                                 HttpServletRequest request) {
-        ActivityPeriod period = requiredPeriod(periodId);
+        ActivityPeriod period = lockPeriod(periodId);
         if (!"CONFIRMATION".equals(period.getStatus())) {
             throw new BusinessException("LOCAL_REMATCH_NOT_OPEN", "仅双方确认阶段可以进行局部重新匹配");
         }
@@ -81,12 +96,10 @@ public class MatchingService {
                 .eq(MatchRound::getPeriodId, periodId)
                 .eq(MatchRound::getRoundType, "LOCAL_REMATCH")
                 .eq(MatchRound::getStatus, "DRAFT").last("LIMIT 1"));
-        if (draft != null) {
-            throw new BusinessException("LOCAL_REMATCH_DRAFT_EXISTS", "已有待调整的局部重匹配方案，请先处理并发布");
-        }
+        if (draft != null) throw new BusinessException("LOCAL_REMATCH_DRAFT_EXISTS", "已有局部重匹配草稿，请先处理");
         MatchRound latestLocalRound = roundMapper.selectOne(Wrappers.<MatchRound>lambdaQuery()
                 .eq(MatchRound::getPeriodId, periodId)
-                .eq(MatchRound::getRoundType, "LOCAL_REMATCH")
+                .eq(MatchRound::getRoundType, "LOCAL_REMATCH").eq(MatchRound::getStatus, "PUBLISHED")
                 .orderByDesc(MatchRound::getRoundNo).last("LIMIT 1"));
         var rejectedQuery = Wrappers.<RejectedMatchPair>lambdaQuery()
                 .eq(RejectedMatchPair::getPeriodId, periodId)
@@ -102,6 +115,15 @@ public class MatchingService {
                         .eq(ParticipationApplication::getPeriodId, periodId)
                         .in(ParticipationApplication::getStudentUserId, affectedUserIds))
                 .stream().map(ParticipationApplication::getId).collect(Collectors.toSet());
+        var settings = workspace.policy(period);
+        if (settings.revision() > 0) {
+            MatchRound latestPublished = latestPublished(periodId);
+            MatchingPolicy policy = latestPublished != null && latestPublished.getPolicyRevision() != null
+                    ? ruleSnapshot(latestPublished).policy() : settings.policy();
+            MatchRound round = generateStructured(actor, period, "LOCAL_REMATCH",
+                    new MatchingWorkspace.PolicyVersion(settings.revision(), policy), affectedApplicationIds, request);
+            return listAdmin(periodId, round.getId());
+        }
         return generateRound(actor, period, "LOCAL_REMATCH", affectedApplicationIds, request);
     }
 
@@ -123,11 +145,8 @@ public class MatchingService {
         }
 
         MatchRound round = new MatchRound();
-        Integer maxRound = roundMapper.selectObjs(Wrappers.<MatchRound>query()
-                        .select("MAX(round_no)").eq("period_id", periodId)).stream()
-                .filter(Objects::nonNull).map(value -> ((Number) value).intValue()).findFirst().orElse(0);
         round.setPeriodId(periodId);
-        round.setRoundNo(maxRound + 1);
+        round.setRoundNo(nextRoundNo(periodId));
         round.setRoundType(roundType);
         round.setStatus("DRAFT");
         round.setWeightSnapshot(json(weights(period)));
@@ -181,27 +200,269 @@ public class MatchingService {
         return listAdmin(periodId, round.getId());
     }
 
+    @Transactional
+    public RoundView preview(AuthenticatedUser actor, Long periodId, int workspaceRevision, Long replaceRoundId,
+                             Integer replaceRevision, HttpServletRequest request) {
+        ActivityPeriod period = lockPeriod(periodId);
+        if (!"MATCHING".equals(period.getStatus()) || latestPublished(periodId) != null) {
+            throw new BusinessException("MATCHING_PREVIEW_NOT_OPEN", "仅首次发布前的匹配阶段可以生成本期试算");
+        }
+        var settings = workspace.policy(period);
+        MatchingWorkspace.checkRevision(workspaceRevision, settings.revision());
+        if (settings.revision() == 0) throw new BusinessException("MATCHING_POLICY_NOT_SAVED", "请先保存本期匹配规则");
+        List<MatchRound> drafts = roundMapper.selectList(Wrappers.<MatchRound>lambdaQuery()
+                .eq(MatchRound::getPeriodId, periodId).eq(MatchRound::getStatus, "DRAFT")
+                .orderByDesc(MatchRound::getRoundNo));
+        MatchRound current = drafts.isEmpty() ? null : drafts.getFirst();
+        if (!Objects.equals(replaceRoundId, current == null ? null : current.getId())
+                || !Objects.equals(replaceRevision, current == null ? null : current.getDraftRevision())) {
+            throw new BusinessException("MATCHING_VERSION_CONFLICT", "试算草稿已更新，请刷新并确认替换", HttpStatus.CONFLICT);
+        }
+        for (MatchRound draft : drafts) supersede(actor, draft, "重新试算替换草稿", request);
+        return roundView(generateStructured(actor, period, "NORMAL", settings, Set.of(), request));
+    }
+
+    private MatchRound generateStructured(AuthenticatedUser actor, ActivityPeriod period, String roundType,
+                                          MatchingWorkspace.PolicyVersion settings, Set<Long> affected,
+                                          HttpServletRequest request) {
+        long periodId = period.getId();
+        var people = workspace.participants(periodId, unavailableApplicationIds(periodId));
+        Set<MatchingPlanner.Key> blocked = workspace.blocked(periodId);
+        Map<Long, Long> applicationByUser = people.stream().collect(Collectors.toMap(
+                person -> person.application().getStudentUserId(), MatchingPlanner.Participant::id));
+        for (RejectedMatchPair pair : rejectedPairMapper.selectList(Wrappers.<RejectedMatchPair>lambdaQuery()
+                .eq(RejectedMatchPair::getPeriodId, periodId).eq(RejectedMatchPair::getActive, true))) {
+            Long first = applicationByUser.get(pair.getNavigatorUserId()), second = applicationByUser.get(pair.getClimberUserId());
+            if (first != null && second != null) blocked.add(MatchingPlanner.Key.of(first, second));
+        }
+        var plan = MatchingPlanner.plan(settings.policy(), people, blocked, affected);
+        if (!affected.isEmpty() && plan.candidates().isEmpty()) {
+            throw new BusinessException("NO_LOCAL_REMATCH_CANDIDATE", "没有满足当前规则的局部重匹配组合，请复核依据");
+        }
+        Set<Long> considered = new HashSet<>(affected);
+        if (!affected.isEmpty()) plan.candidates().forEach(edge -> {
+            considered.add(edge.first().id());
+            considered.add(edge.second().id());
+        });
+        MatchRound round = new MatchRound();
+        round.setPeriodId(periodId);
+        round.setRoundNo(nextRoundNo(periodId));
+        round.setRoundType(roundType);
+        round.setStatus("DRAFT");
+        round.setPolicyRevision(settings.revision());
+        round.setDraftRevision(0);
+        round.setWeightSnapshot(json(new RuleSnapshot(settings.policy(), people.stream().map(MatchingPlanner.Participant::id)
+                .filter(id -> affected.isEmpty() || considered.contains(id)).toList())));
+        round.setCreatedBy(actor.id());
+        roundMapper.insert(round);
+        for (var edge : plan.candidates()) {
+            MatchCandidate candidate = new MatchCandidate();
+            candidate.setRoundId(round.getId());
+            candidate.setNavigatorApplicationId(edge.first().id());
+            candidate.setClimberApplicationId(edge.second().id());
+            candidate.setMatchKind(edge.rule().kind().name());
+            candidate.setTotalScore(BigDecimal.ZERO);
+            candidate.setScoreDetail(json(edge.basis()));
+            candidate.setMatchedSubjects(json(edge.subjects()));
+            candidate.setManuallySelected(false);
+            boolean selected = plan.selected().contains(edge);
+            candidate.setAdminConfirmed(selected);
+            candidate.setStatus(selected ? "SELECTED" : "GENERATED");
+            candidate.setNavigatorDecision("PENDING");
+            candidate.setClimberDecision("PENDING");
+            candidateMapper.insert(candidate);
+        }
+        auditService.log(actor, "MATCHING_WORKSPACE_PREVIEW", "MATCH_ROUND", round.getId(), null,
+                Map.of("periodId", periodId, "candidateCount", plan.candidates().size(), "selectedPairs", plan.selected().size()), null, request);
+        return requiredRound(round.getId());
+    }
+
+    @Transactional(readOnly = true)
+    public List<RoundSummary> rounds(Long periodId) {
+        requiredPeriod(periodId);
+        return roundMapper.selectList(Wrappers.<MatchRound>lambdaQuery().eq(MatchRound::getPeriodId, periodId)
+                        .orderByDesc(MatchRound::getRoundNo)).stream().map(this::summary).toList();
+    }
+
+    @Transactional(readOnly = true)
+    public RoundView roundView(Long periodId, Long roundId) {
+        MatchRound round = requiredRound(roundId);
+        if (!periodId.equals(round.getPeriodId())) throw new BusinessException("MATCH_ROUND_NOT_FOUND", "本期匹配轮次不存在", HttpStatus.NOT_FOUND);
+        return roundView(round);
+    }
+
+    private RoundView roundView(MatchRound round) {
+        RuleSnapshot snapshot = round.getPolicyRevision() == null ? new RuleSnapshot(null, List.of()) : ruleSnapshot(round);
+        List<AdjustmentLog> adjustments = logMapper.selectList(Wrappers.<OperationLog>lambdaQuery()
+                        .eq(OperationLog::getAction, "MATCHING_MANUAL_ADJUST").eq(OperationLog::getTargetType, "MATCH_ROUND")
+                        .eq(OperationLog::getTargetId, round.getId().toString()).orderByDesc(OperationLog::getId))
+                .stream().map(log -> new AdjustmentLog(log.getActorLogin(), log.getReason(), log.getCreatedAt(),
+                        readIds(log.getBeforeSnapshot()), readIds(log.getAfterSnapshot()))).toList();
+        return new RoundView(summary(round), snapshot.policy(), snapshot.participantIds(), adminCandidates(round), adjustments);
+    }
+
+    private List<Long> readIds(String value) {
+        try { return objectMapper.readValue(value, new TypeReference<>() {}); }
+        catch (JsonProcessingException exception) { throw new IllegalStateException(exception); }
+    }
+
+    private RuleSnapshot ruleSnapshot(MatchRound round) {
+        try { return objectMapper.readValue(round.getWeightSnapshot(), RuleSnapshot.class); }
+        catch (JsonProcessingException exception) { throw new IllegalStateException(exception); }
+    }
+
+    private RoundSummary summary(MatchRound round) {
+        return new RoundSummary(round.getId(), round.getRoundNo(), round.getRoundType(), round.getStatus(),
+                round.getPolicyRevision(), round.getDraftRevision(), round.getCreatedAt(), round.getPublishedAt());
+    }
+
+    private List<MatchCandidateResponse> adminCandidates(MatchRound round) {
+        List<MatchCandidate> candidates = candidateMapper.selectList(Wrappers.<MatchCandidate>lambdaQuery()
+                .eq(MatchCandidate::getRoundId, round.getId()).orderByDesc(MatchCandidate::getAdminConfirmed)
+                .orderByDesc(MatchCandidate::getTotalScore).orderByAsc(MatchCandidate::getId));
+        if (candidates.isEmpty()) return List.of();
+        Set<Long> ids = candidates.stream().flatMap(candidate -> members(candidate).stream()).collect(Collectors.toSet());
+        Map<Long, ParticipationApplication> apps = applicationMapper.selectByIds(ids).stream()
+                .collect(Collectors.toMap(ParticipationApplication::getId, Function.identity()));
+        Map<Long, ApplicationProfileSnapshot> profiles = snapshotMapper.selectList(Wrappers.<ApplicationProfileSnapshot>lambdaQuery()
+                        .in(ApplicationProfileSnapshot::getApplicationId, ids)).stream()
+                .collect(Collectors.toMap(ApplicationProfileSnapshot::getApplicationId, Function.identity()));
+        Map<Long, SupportPair> pairs = supportPairMapper.selectList(Wrappers.<SupportPair>lambdaQuery()
+                        .eq(SupportPair::getPeriodId, round.getPeriodId()).isNotNull(SupportPair::getSourceCandidateId)).stream()
+                .collect(Collectors.toMap(SupportPair::getSourceCandidateId, Function.identity(), (first, second) -> first));
+        return candidates.stream().map(candidate -> {
+            Long a = candidate.getNavigatorApplicationId(), b = candidate.getClimberApplicationId();
+            return response(candidate, round, apps.get(a), apps.get(b), profiles.get(a), profiles.get(b), pairs.get(candidate.getId()), false, null);
+        }).toList();
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public RoundView adjust(AuthenticatedUser actor, Long roundId, int revision, Long removeId, Long selectId, String reason,
+                            HttpServletRequest request) {
+        ActivityPeriod period = lockRoundPeriod(roundId);
+        MatchRound round = requiredRound(roundId);
+        requireEditable(round, period, revision);
+        if (Objects.equals(removeId, selectId)) throw new BusinessException("INVALID_MATCHING_ADJUSTMENT", "请选择拆组或新的候选组合");
+        List<MatchCandidate> before = candidateMapper.selectList(Wrappers.<MatchCandidate>lambdaQuery()
+                .eq(MatchCandidate::getRoundId, roundId).eq(MatchCandidate::getAdminConfirmed, true));
+        MatchCandidate remove = removeId == null ? null : before.stream().filter(pair -> removeId.equals(pair.getId())).findFirst()
+                .orElseThrow(() -> new BusinessException("INVALID_MATCHING_ADJUSTMENT", "待解除的组合已变更，请刷新"));
+        MatchCandidate selected = selectId == null ? null : requiredCandidate(selectId);
+        if (selected != null && (!roundId.equals(selected.getRoundId()) || !"GENERATED".equals(selected.getStatus())
+                || remove != null && Collections.disjoint(members(remove), members(selected)))) {
+            throw new BusinessException("INVALID_MATCHING_ADJUSTMENT", "请选择本轮符合规则的候选组合");
+        }
+        List<MatchCandidate> removed = before.stream().filter(pair -> pair == remove
+                || selected != null && !Collections.disjoint(members(pair), members(selected))).toList();
+        List<MatchCandidate> after = new ArrayList<>(before);
+        after.removeAll(removed);
+        if (selected != null) after.add(selected);
+        validateSelection(round, after);
+        for (MatchCandidate candidate : removed) {
+            candidate.setAdminConfirmed(false);
+            candidate.setManuallySelected(false);
+            candidate.setStatus("GENERATED");
+            candidateMapper.updateById(candidate);
+        }
+        if (selected != null) {
+            selected.setAdminConfirmed(true);
+            selected.setManuallySelected(true);
+            selected.setStatus("SELECTED");
+            candidateMapper.updateById(selected);
+        }
+        round.setDraftRevision(round.getDraftRevision() + 1);
+        roundMapper.updateById(round);
+        auditService.log(actor, "MATCHING_MANUAL_ADJUST", "MATCH_ROUND", roundId,
+                before.stream().map(MatchCandidate::getId).toList(), after.stream().map(MatchCandidate::getId).toList(), reason.strip(), request);
+        return roundView(round);
+    }
+
+    private List<Long> members(MatchCandidate candidate) {
+        return List.of(candidate.getNavigatorApplicationId(), candidate.getClimberApplicationId());
+    }
+
+    private void validateSelection(MatchRound round, List<MatchCandidate> selected) {
+        Set<Long> people = new HashSet<>();
+        for (MatchCandidate candidate : selected) {
+            for (Long id : members(candidate)) {
+                if (!people.add(id)) throw new BusinessException("MATCHING_STUDENT_OCCUPIED", "同一学生本期只能进入一组");
+            }
+        }
+        if (round.getPolicyRevision() == null) return;
+        Set<MatchingPlanner.Key> blocked = workspace.blocked(round.getPeriodId());
+        for (MatchCandidate candidate : selected) {
+            if (blocked.contains(MatchingPlanner.Key.of(candidate.getNavigatorApplicationId(), candidate.getClimberApplicationId()))) {
+                throw new BusinessException("MATCHING_PAIR_EXCLUDED", "该组合已排除，请重新试算");
+            }
+        }
+        for (MatchingPolicy.Rule rule : ruleSnapshot(round).policy().rules()) {
+            long count = selected.stream().filter(pair -> rule.kind().name().equals(pair.getMatchKind())).count();
+            if (rule.maximumPairs() != null && count > rule.maximumPairs()) {
+                throw new BusinessException("MATCHING_RULE_CAPACITY", "调整会超过该规则配置的组数上限");
+            }
+        }
+    }
+
+    private void requireEditable(MatchRound round, ActivityPeriod period, Integer revision) {
+        requireRoundOperationStage(round, period);
+        if (!"DRAFT".equals(round.getStatus()) || round.getPolicyRevision() == null) {
+            throw new BusinessException("MATCHING_DRAFT_NOT_EDITABLE", "仅本期规则试算草稿可调整");
+        }
+        if (revision == null) throw new BusinessException("MATCHING_REVISION_REQUIRED", "请从工作台提交当前草稿版本");
+        MatchingWorkspace.checkRevision(revision, round.getDraftRevision());
+        MatchingWorkspace.checkRevision(round.getPolicyRevision(), workspace.policy(period).revision());
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public void discard(AuthenticatedUser actor, Long roundId, Integer revision, String reason, HttpServletRequest request) {
+        ActivityPeriod period = lockRoundPeriod(roundId);
+        MatchRound round = requiredRound(roundId);
+        requireRoundOperationStage(round, period);
+        if (!"DRAFT".equals(round.getStatus()) || !Objects.equals(revision, round.getDraftRevision())) {
+            throw new BusinessException("MATCHING_VERSION_CONFLICT", "草稿已更新，请刷新后再操作", HttpStatus.CONFLICT);
+        }
+        supersede(actor, round, reason, request);
+    }
+
+    private void supersede(AuthenticatedUser actor, MatchRound round, String reason, HttpServletRequest request) {
+        round.setStatus("SUPERSEDED");
+        roundMapper.updateById(round);
+        auditService.log(actor, "MATCHING_DRAFT_SUPERSEDED", "MATCH_ROUND", round.getId(), null, null, reason.strip(), request);
+    }
+
+    private MatchRound latestPublished(long periodId) {
+        return roundMapper.selectOne(Wrappers.<MatchRound>lambdaQuery().eq(MatchRound::getPeriodId, periodId)
+                .eq(MatchRound::getStatus, "PUBLISHED").orderByDesc(MatchRound::getRoundNo).last("LIMIT 1"));
+    }
+
+    private int nextRoundNo(long periodId) {
+        return 1 + roundMapper.selectObjs(Wrappers.<MatchRound>query()
+                        .select("MAX(round_no)").eq("period_id", periodId))
+                .stream().filter(Objects::nonNull).mapToInt(value -> ((Number) value).intValue()).findFirst().orElse(0);
+    }
+
     public List<MatchCandidateResponse> listAdmin(Long periodId, Long roundId) {
         Long targetRound = roundId;
         if (targetRound == null) {
             MatchRound latest = roundMapper.selectOne(Wrappers.<MatchRound>lambdaQuery()
-                    .eq(MatchRound::getPeriodId, periodId).orderByDesc(MatchRound::getRoundNo).last("LIMIT 1"));
+                    .eq(MatchRound::getPeriodId, periodId).ne(MatchRound::getStatus, "SUPERSEDED")
+                    .orderByDesc(MatchRound::getRoundNo).last("LIMIT 1"));
             if (latest == null) return List.of();
             targetRound = latest.getId();
         }
-        return candidateMapper.selectList(Wrappers.<MatchCandidate>lambdaQuery()
-                        .eq(MatchCandidate::getRoundId, targetRound)
-                        .orderByDesc(MatchCandidate::getAdminConfirmed)
-                        .orderByDesc(MatchCandidate::getTotalScore))
-                .stream().map(candidate -> response(candidate, false, null)).toList();
+        MatchRound round = requiredRound(targetRound);
+        if (!periodId.equals(round.getPeriodId())) throw new BusinessException("MATCH_ROUND_NOT_FOUND", "本期匹配轮次不存在", HttpStatus.NOT_FOUND);
+        return adminCandidates(round);
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public MatchCandidateResponse select(AuthenticatedUser actor, Long candidateId, HttpServletRequest request) {
+        ActivityPeriod period = lockCandidatePeriod(candidateId);
         MatchCandidate selected = requiredCandidate(candidateId);
         MatchRound round = requiredRound(selected.getRoundId());
-        ActivityPeriod period = requiredPeriod(round.getPeriodId());
         requireRoundOperationStage(round, period);
+        if (round.getPolicyRevision() != null || workspace.policy(period).revision() > 0)
+            throw new BusinessException("MATCHING_WORKSPACE_REQUIRED", "规则轮次须在工作台填写原因后调整");
         if (!"DRAFT".equals(round.getStatus())) throw new BusinessException("ROUND_ALREADY_PUBLISHED", "已发布轮次不可调整");
         List<MatchCandidate> conflicts = candidateMapper.selectList(Wrappers.<MatchCandidate>lambdaQuery()
                 .eq(MatchCandidate::getRoundId, round.getId())
@@ -217,18 +478,31 @@ public class MatchingService {
         return response(requiredCandidate(candidateId), false, null);
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public List<MatchCandidateResponse> publish(AuthenticatedUser actor, Long roundId, HttpServletRequest request) {
+        return publish(actor, roundId, null, request);
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public List<MatchCandidateResponse> publish(AuthenticatedUser actor, Long roundId, Integer revision,
+                                               HttpServletRequest request) {
+        ActivityPeriod period = lockRoundPeriod(roundId);
         MatchRound round = requiredRound(roundId);
-        ActivityPeriod period = requiredPeriod(round.getPeriodId());
         requireRoundOperationStage(round, period);
         if (!LocalDateTime.now().isBefore(period.getConfirmationDeadline())) {
             throw new BusinessException("CONFIRMATION_DEADLINE_REACHED", "匹配确认截止时间已到，请调整期次时间后再发布");
         }
         if (!"DRAFT".equals(round.getStatus())) throw new BusinessException("ROUND_ALREADY_PUBLISHED", "该轮匹配已经发布");
+        if (round.getPolicyRevision() != null) requireEditable(round, period, revision);
+        else if (workspace.policy(period).revision() > 0) throw new BusinessException("MATCHING_WORKSPACE_REQUIRED", "请按现行规则重新试算后发布");
         List<MatchCandidate> selected = candidateMapper.selectList(Wrappers.<MatchCandidate>lambdaQuery()
                 .eq(MatchCandidate::getRoundId, roundId).eq(MatchCandidate::getAdminConfirmed, true));
         if (selected.isEmpty()) throw new BusinessException("NO_SELECTED_CANDIDATE", "请先确认至少一个候选组合");
+        validateSelection(round, selected);
+        Set<Long> unavailable = unavailableApplicationIds(round.getPeriodId());
+        if (selected.stream().anyMatch(candidate -> members(candidate).stream().anyMatch(unavailable::contains))) {
+            throw new BusinessException("MATCHING_STUDENT_OCCUPIED", "学生已在另一轮发布或确认，请重新试算");
+        }
         LocalDateTime now = LocalDateTime.now();
         for (MatchCandidate candidate : selected) {
             candidate.setStatus("PUBLISHED");
@@ -258,11 +532,11 @@ public class MatchingService {
                 .map(candidate -> response(candidate, true, userId)).toList();
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public MatchCandidateResponse decide(AuthenticatedUser actor, Long candidateId, MatchDecisionRequest decision,
                                          HttpServletRequest request) {
+        ActivityPeriod period = lockCandidatePeriod(candidateId);
         MatchCandidate candidate = requiredCandidate(candidateId);
-        ActivityPeriod period = requiredPeriod(requiredRound(candidate.getRoundId()).getPeriodId());
         if (!"CONFIRMATION".equals(period.getStatus())) {
             throw new BusinessException("MATCHING_CONFIRMATION_NOT_OPEN", "仅双方确认阶段可以确认或拒绝匹配");
         }
@@ -320,6 +594,7 @@ public class MatchingService {
         pair.setNavigatorApplicationId(candidate.getNavigatorApplicationId());
         pair.setClimberApplicationId(candidate.getClimberApplicationId());
         pair.setSourceCandidateId(candidate.getId());
+        pair.setMatchKind(candidate.getMatchKind());
         pair.setStatus("ACTIVE");
         pair.setConfirmedAt(LocalDateTime.now());
         supportPairMapper.insert(pair);
@@ -389,8 +664,7 @@ public class MatchingService {
 
     private Set<Long> unavailableApplicationIds(Long periodId) {
         Set<Long> ids = new HashSet<>();
-        supportPairMapper.selectList(Wrappers.<SupportPair>lambdaQuery().eq(SupportPair::getPeriodId, periodId)
-                .eq(SupportPair::getStatus, "ACTIVE")).forEach(pair -> {
+        supportPairMapper.selectList(Wrappers.<SupportPair>lambdaQuery().eq(SupportPair::getPeriodId, periodId)).forEach(pair -> {
             ids.add(pair.getNavigatorApplicationId()); ids.add(pair.getClimberApplicationId());
         });
         List<MatchRound> rounds = roundMapper.selectList(Wrappers.<MatchRound>lambdaQuery().eq(MatchRound::getPeriodId, periodId));
@@ -405,8 +679,10 @@ public class MatchingService {
     private boolean isRejected(Long periodId, Long navigatorUserId, Long climberUserId) {
         return rejectedPairMapper.selectCount(Wrappers.<RejectedMatchPair>lambdaQuery()
                 .eq(RejectedMatchPair::getPeriodId, periodId)
-                .eq(RejectedMatchPair::getNavigatorUserId, navigatorUserId)
-                .eq(RejectedMatchPair::getClimberUserId, climberUserId)
+                .and(q -> q.eq(RejectedMatchPair::getNavigatorUserId, navigatorUserId)
+                        .eq(RejectedMatchPair::getClimberUserId, climberUserId)
+                        .or(other -> other.eq(RejectedMatchPair::getNavigatorUserId, climberUserId)
+                                .eq(RejectedMatchPair::getClimberUserId, navigatorUserId)))
                 .eq(RejectedMatchPair::getActive, true)) > 0;
     }
 
@@ -417,6 +693,12 @@ public class MatchingService {
         ApplicationProfileSnapshot np = snapshot(navigator.getId()), cp = snapshot(climber.getId());
         SupportPair pair = supportPairMapper.selectOne(Wrappers.<SupportPair>lambdaQuery()
                 .eq(SupportPair::getSourceCandidateId, candidate.getId()).last("LIMIT 1"));
+        return response(candidate, round, navigator, climber, np, cp, pair, studentView, viewerId);
+    }
+
+    private MatchCandidateResponse response(MatchCandidate candidate, MatchRound round, ParticipationApplication navigator,
+                                            ParticipationApplication climber, ApplicationProfileSnapshot np,
+                                            ApplicationProfileSnapshot cp, SupportPair pair, boolean studentView, Long viewerId) {
         boolean formal = pair != null && "ACTIVE".equals(pair.getStatus());
         boolean viewerIsNavigator = viewerId != null && navigator.getStudentUserId().equals(viewerId);
         String navigatorName = studentView && !formal && !viewerIsNavigator ? mask(np.getRealName()) : np.getRealName();
@@ -426,12 +708,16 @@ public class MatchingService {
             ApplicationProfileSnapshot partner = viewerIsNavigator ? cp : np;
             partnerWechat = partner.getWechat(); partnerPhone = partner.getPhone();
         }
+        boolean legacy = round.getPolicyRevision() == null;
         return new MatchCandidateResponse(candidate.getId(), candidate.getRoundId(), round.getPeriodId(), round.getRoundType(), candidate.getStatus(),
-                studentView ? null : candidate.getTotalScore(), studentView ? null : map(candidate.getScoreDetail()), list(candidate.getMatchedSubjects()),
+                !studentView && legacy ? candidate.getTotalScore() : null, !studentView && legacy ? map(candidate.getScoreDetail()) : null,
+                list(candidate.getMatchedSubjects()),
                 navigator.getId(), navigator.getStudentUserId(), navigatorName, np.getMajor(), np.getGrade(),
                 climber.getId(), climber.getStudentUserId(), climberName,
                 cp.getMajor(), cp.getGrade(), candidate.getNavigatorDecision(), candidate.getClimberDecision(),
-                candidate.getRejectionReason(), partnerWechat, partnerPhone, pair == null ? null : pair.getId());
+                candidate.getRejectionReason(), partnerWechat, partnerPhone, pair == null ? null : pair.getId(),
+                candidate.getMatchKind(), !studentView && !legacy ? map(candidate.getScoreDetail()) : null,
+                studentView ? null : candidate.getManuallySelected());
     }
 
     private void requireRoundOperationStage(MatchRound round, ActivityPeriod period) {
@@ -461,6 +747,26 @@ public class MatchingService {
         ActivityPeriod period = periodMapper.selectById(id);
         if (period == null) throw new BusinessException("PERIOD_NOT_FOUND", "期次不存在", HttpStatus.NOT_FOUND);
         return period;
+    }
+
+    private ActivityPeriod lockPeriod(Long id) {
+        ActivityPeriod period = periodMapper.lockById(id);
+        if (period == null) throw new BusinessException("PERIOD_NOT_FOUND", "期次不存在", HttpStatus.NOT_FOUND);
+        return period;
+    }
+
+    private ActivityPeriod lockRoundPeriod(Long roundId) {
+        MatchRound reference = roundMapper.selectOne(Wrappers.<MatchRound>lambdaQuery().select(MatchRound::getPeriodId)
+                .eq(MatchRound::getId, roundId));
+        if (reference == null) throw new BusinessException("MATCH_ROUND_NOT_FOUND", "匹配轮次不存在", HttpStatus.NOT_FOUND);
+        return lockPeriod(reference.getPeriodId());
+    }
+
+    private ActivityPeriod lockCandidatePeriod(Long candidateId) {
+        MatchCandidate reference = candidateMapper.selectOne(Wrappers.<MatchCandidate>lambdaQuery().select(MatchCandidate::getRoundId)
+                .eq(MatchCandidate::getId, candidateId));
+        if (reference == null) throw new BusinessException("MATCH_CANDIDATE_NOT_FOUND", "匹配候选不存在", HttpStatus.NOT_FOUND);
+        return lockRoundPeriod(reference.getRoundId());
     }
     private MatchRound requiredRound(Long id) {
         MatchRound round = roundMapper.selectById(id);

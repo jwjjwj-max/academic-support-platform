@@ -229,11 +229,12 @@ public class MaterialService {
         boolean canSubmitReflection = !admin && "ACTIVE".equals(pair.getStatus()) && canReflectionSubmitInCurrentPhase(period);
         boolean canSubmit = canUploadPhoto || canSubmitReflection;
         boolean canAccept = admin && "ACTIVE".equals(pair.getStatus()) && "ACCEPTANCE".equals(period.getStatus());
+        boolean peers = "PEER".equals(pair.getMatchKind());
         return new PairDetailResponse(pair.getId(), pair.getPeriodId(), period.getName(), period.getStatus(), pair.getPairNo(), pair.getStatus(), pair.getConfirmedAt(),
                 pair.getCompletedAt(), pair.getAcceptanceNote(), pair.getEndedAt(), pair.getEndReason(), period.getPhotoMin(), period.getPhotoMax(),
-                new PairDetailResponse.Member(navUser.getId(), navUser.getDisplayName(), "NAVIGATOR"),
-                new PairDetailResponse.Member(climbUser.getId(), climbUser.getDisplayName(), "CLIMBER"), photos, reflections,
-                canSubmit, canUploadPhoto, canSubmitReflection, canAccept);
+                new PairDetailResponse.Member(navUser.getId(), navUser.getDisplayName(), peers ? "PEER" : "NAVIGATOR"),
+                new PairDetailResponse.Member(climbUser.getId(), climbUser.getDisplayName(), peers ? "PEER" : "CLIMBER"), photos, reflections,
+                canSubmit, canUploadPhoto, canSubmitReflection, canAccept, pair.getMatchKind());
     }
 
     private SupportPair requireStudentPair(Long pairId, Long userId) {

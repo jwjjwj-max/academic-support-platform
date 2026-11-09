@@ -17,6 +17,7 @@ public class SupportPair {
     private Long navigatorApplicationId;
     private Long climberApplicationId;
     private Long sourceCandidateId;
+    private String matchKind;
     private String status;
     private LocalDateTime confirmedAt;
     private Long completedBy;

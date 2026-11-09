@@ -124,9 +124,70 @@ export interface MatchCandidate {
   partnerWechat?: string
   partnerPhone?: string
   supportPairId?: number
+  matchKind?: MatchKind
+  coverage?: MatchCoverage
+  manuallySelected?: boolean
 }
 
-export interface PairMember { userId: number; name: string; role: 'NAVIGATOR' | 'CLIMBER' }
+export type MatchKind = 'LEGACY' | 'PEER' | 'REGULAR' | 'FRESHMAN_SUPPORT'
+export interface MatchCoverageItem { course: string; knowledgePoint?: string; offerQuote: string; needQuote: string }
+export interface MatchCoverage {
+  firstToSecond: MatchCoverageItem[]
+  secondToFirst: MatchCoverageItem[]
+  firstUncovered: string[]
+  secondUncovered: string[]
+}
+export interface MatchingRule {
+  kind: Exclude<MatchKind, 'LEGACY'>
+  enabled: boolean
+  minimumCoverage: number
+  maximumPairs?: number | null
+  allowOlderNavigator: boolean
+  requireHigherGpa: boolean
+}
+export interface MatchingPolicy { freshmanGrade: number; allowExternalAnalysis: boolean; rules: MatchingRule[] }
+export interface MatchingPolicyVersion { revision: number; policy: MatchingPolicy }
+export interface MatchingTopic { course: string; knowledgePoint?: string; quote: string }
+export interface MatchingFacts { needs: MatchingTopic[]; offers: MatchingTopic[] }
+export interface MatchingStudent {
+  id: number
+  revision: number
+  name: string
+  studentNo: string
+  grade: number
+  role: ParticipantRole
+  subjects: string[]
+  statement: string
+  externalPreview?: string
+  pairingClue: boolean
+  evidence?: { applicationRevision: number; facts: MatchingFacts; reviewed: boolean }
+}
+export interface MatchingExclusion { firstApplicationId: number; secondApplicationId: number; reason: string }
+export interface MatchingWorkspace {
+  settings: MatchingPolicyVersion
+  students: MatchingStudent[]
+  exclusions: MatchingExclusion[]
+}
+export interface MatchingProvider { encryptionReady: boolean; configured: boolean; suffix?: string; model: string }
+export interface MatchingRound {
+  id: number
+  roundNo: number
+  roundType: MatchCandidate['roundType']
+  status: 'DRAFT' | 'PUBLISHED' | 'SUPERSEDED'
+  workspaceRevision?: number
+  draftRevision?: number
+  createdAt: string
+  publishedAt?: string
+}
+export interface MatchingRoundView {
+  round: MatchingRound
+  policy?: MatchingPolicy
+  participantIds: number[]
+  candidates: MatchCandidate[]
+  adjustments: Array<{ administrator: string; reason: string; time: string; before: number[]; after: number[] }>
+}
+
+export interface PairMember { userId: number; name: string; role: 'NAVIGATOR' | 'CLIMBER' | 'PEER' }
 export interface PairPhoto {
   id: number; uploaderId: number; uploaderName: string; originalFilename: string; mimeType: string; fileSize: number
   description?: string; status: string; revisionNo: number; submittedAt: string; peerConfirmedAt?: string; reviewedAt?: string
@@ -141,6 +202,7 @@ export interface SupportPairDetail {
   confirmedAt: string; completedAt?: string; acceptanceNote?: string; endedAt?: string; endReason?: string
   photoMin: number; photoMax: number; navigator: PairMember; climber: PairMember; photos: PairPhoto[]
   reflections: PairReflection[]; canSubmit: boolean; canUploadPhoto: boolean; canSubmitReflection: boolean; canAccept: boolean
+  matchKind?: MatchKind
 }
 export interface NotificationItem { id: number; periodId?: number; title: string; content: string; audienceLabel: string; createdAt: string; readAt?: string; createdByName: string }
 export interface TodoItem { type: string; title: string; description: string; targetId?: number; route: string; count: number }

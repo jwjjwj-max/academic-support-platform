@@ -1,28 +1,296 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import MatchingEvidencePanel from '@/components/MatchingEvidencePanel.vue'
+import MatchingRoundPanel from '@/components/MatchingRoundPanel.vue'
+import MatchingRulesEditor from '@/components/MatchingRulesEditor.vue'
 import { apiErrorMessage, http } from '@/services/http'
-import type { ApiResponse, MatchCandidate, Period } from '@/types/api'
+import type {
+  ApiResponse, MatchingExclusion, MatchingFacts, MatchingPolicy, MatchingProvider, MatchingRound,
+  MatchingRoundView, MatchingStudent, MatchingWorkspace, Period,
+} from '@/types/api'
 import { labelOf } from '@/utils/labels'
 import { canGenerateLocalRematch, canGenerateMatching, canOperateRound } from '@/utils/matching-stage'
+import { selectedPairs } from '@/utils/matching-workbench'
 
-const periods = ref<Period[]>([]), periodId = ref<number | ''>(''), items = ref<MatchCandidate[]>([]), loading = ref(true), running = ref(false), error = ref(''), success = ref('')
-const selected = computed(() => items.value.filter(item => item.status === 'SELECTED' || item.status === 'PUBLISHED' || item.status === 'CONFIRMED'))
-const roundId = computed(() => items.value[0]?.roundId)
-const selectedPeriod = computed(() => periods.value.find(item => item.id === periodId.value))
-const canRun = computed(() => canGenerateMatching(selectedPeriod.value?.status))
-const canRematch = computed(() => canGenerateLocalRematch(selectedPeriod.value?.status))
-const canEditRound = computed(() => canOperateRound(selectedPeriod.value?.status, items.value[0]?.roundType))
-async function loadPeriods() { periods.value = (await http.get<ApiResponse<Period[]>>('/periods')).data.data; const active = periods.value.find(item => ['MATCHING', 'CONFIRMATION'].includes(item.status)); periodId.value = active?.id || periods.value[0]?.id || '' }
-async function load() { if (!periodId.value) { loading.value = false; return } loading.value = true; try { items.value = (await http.get<ApiResponse<MatchCandidate[]>>(`/admin/matching/periods/${periodId.value}/candidates`)).data.data } catch (e) { error.value = apiErrorMessage(e) } finally { loading.value = false } }
-async function run() { if (!periodId.value) return; running.value = true; error.value = ''; try { items.value = (await http.post<ApiResponse<MatchCandidate[]>>(`/admin/matching/periods/${periodId.value}/rounds`)).data.data; success.value = `已生成 ${items.value.length} 个满足硬约束且有相似课程的候选组合，请人工核对。` } catch (e) { error.value = apiErrorMessage(e) } finally { running.value = false } }
-async function rematch() { if (!periodId.value) return; running.value = true; error.value = ''; try { items.value = (await http.post<ApiResponse<MatchCandidate[]>>(`/admin/matching/periods/${periodId.value}/rematch`)).data.data; success.value = `已为本期新拒绝涉及的人员生成 ${items.value.length} 个局部候选组合，其他已发布和已确认组合不受影响。` } catch (e) { error.value = apiErrorMessage(e) } finally { running.value = false } }
-async function choose(item: MatchCandidate) { try { await http.post(`/admin/matching/candidates/${item.id}/select`); success.value = '已调整本轮选中组合，冲突组合已自动取消选择。'; await load() } catch (e) { error.value = apiErrorMessage(e) } }
-async function publish() { if (!roundId.value) return; running.value = true; try { items.value = (await http.post<ApiResponse<MatchCandidate[]>>(`/admin/matching/rounds/${roundId.value}/publish`)).data.data; success.value = selectedPeriod.value?.status === 'MATCHING' ? '匹配结果已发布。请在活动期次中推进至“双方确认阶段”，学生方可查看并处理。' : '局部重匹配结果已发布，相关学生现在可以查看并处理。' } catch (e) { error.value = apiErrorMessage(e) } finally { running.value = false } }
-onMounted(async () => { try { await loadPeriods(); await load() } catch (e) { error.value = apiErrorMessage(e); loading.value = false } })
+const tabs = [
+  { id: 'rules', title: '规则配置' }, { id: 'evidence', title: 'DeepSeek 分析' },
+  { id: 'trial', title: '试算与发布' }, { id: 'history', title: '轮次记录' },
+] as const
+const tab = ref<typeof tabs[number]['id']>('trial')
+const periods = ref<Period[]>([])
+const periodId = ref<number>()
+const workspace = ref<MatchingWorkspace>()
+const provider = ref<MatchingProvider>()
+const rounds = ref<MatchingRound[]>([])
+const current = ref<MatchingRoundView>()
+const previous = ref<MatchingRoundView>()
+const historical = ref<MatchingRoundView>()
+const loading = ref(true), busy = ref(false), error = ref(''), success = ref(''), progress = ref('')
+let readSequence = 0
+
+const period = computed(() => periods.value.find(item => item.id === periodId.value))
+const base = computed(() => `/admin/matching/periods/${periodId.value}/workspace`)
+const published = computed(() => rounds.value.some(round => round.status === 'PUBLISHED'))
+const draft = computed(() => rounds.value.find(round => round.status === 'DRAFT'))
+const canEditRules = computed(() => !published.value && ['REVIEW', 'MATCHING'].includes(period.value?.status ?? ''))
+const canEditEvidence = computed(() => ['REVIEW', 'MATCHING', 'CONFIRMATION'].includes(period.value?.status ?? ''))
+const canPreview = computed(() => canGenerateMatching(period.value?.status) && !published.value)
+const canRematch = computed(() => canGenerateLocalRematch(period.value?.status))
+const draftOpen = computed(() => current.value?.round.status === 'DRAFT' && canOperateRound(period.value?.status, current.value.round.roundType))
+const stale = computed(() => !!current.value?.policy && current.value.round.workspaceRevision !== workspace.value?.settings.revision)
+const editable = computed(() => Boolean(draftOpen.value && !stale.value && current.value?.policy))
+const canPublish = computed(() => draftOpen.value && !stale.value && selectedPairs(current.value).length > 0 &&
+  (Boolean(current.value?.policy) || workspace.value?.settings.revision === 0))
+
+async function fetchData<T>(path: string) {
+  return (await http.get<ApiResponse<T>>(path)).data.data
+}
+
+async function refresh() {
+  const sequence = ++readSequence
+  const path = base.value
+  const [settings, list] = await Promise.all([
+    fetchData<MatchingWorkspace>(path), fetchData<MatchingRound[]>(`${path}/rounds`),
+  ])
+  const latest = list.find(round => round.status === 'DRAFT') ?? list.find(round => round.status === 'PUBLISHED')
+  const last = latest && list.find(round => round.roundNo < latest.roundNo)
+  const [active, compare] = await Promise.all([
+    latest ? fetchData<MatchingRoundView>(`${path}/rounds/${latest.id}`) : undefined,
+    last ? fetchData<MatchingRoundView>(`${path}/rounds/${last.id}`) : undefined,
+  ])
+  if (sequence !== readSequence) return
+  workspace.value = settings
+  rounds.value = list
+  current.value = active
+  previous.value = compare
+}
+
+async function loadPeriod() {
+  if (!periodId.value) return
+  historical.value = undefined
+  workspace.value = undefined
+  current.value = undefined
+  rounds.value = []
+  loading.value = true
+  error.value = ''; success.value = ''
+  try {
+    await refresh()
+  } catch (exception) {
+    error.value = apiErrorMessage(exception)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function operate(action: () => Promise<void>) {
+  if (busy.value || loading.value) return
+  busy.value = true
+  error.value = ''; success.value = ''
+  try {
+    await action()
+  } catch (exception) {
+    error.value = apiErrorMessage(exception)
+  } finally {
+    busy.value = false
+    progress.value = ''
+  }
+}
+
+function saveRules(policy: MatchingPolicy) {
+  return operate(async () => {
+    await http.put(`${base.value}/policy`, { revision: workspace.value?.settings.revision, policy })
+    await refresh()
+    success.value = '本期规则已保存。'
+  })
+}
+
+function analyze(students: MatchingStudent[]) {
+  return operate(async () => {
+    let done = 0
+    try {
+      for (const student of students) {
+        progress.value = `正在分析第 ${done + 1} / ${students.length} 份自述`
+        await http.post(`${base.value}/students/${student.id}/analyze`, {
+          applicationRevision: student.revision, confirmedPreview: student.externalPreview,
+        }, { timeout: 32_000 })
+        done++
+      }
+    } finally {
+      await refresh()
+      if (done) success.value = `已完成 ${done} 份自述分析，可复核提取结果。`
+    }
+  })
+}
+
+function review(student: MatchingStudent, facts: MatchingFacts) {
+  return operate(async () => {
+    await http.put(`${base.value}/students/${student.id}/evidence`, {
+      applicationRevision: student.revision, revision: workspace.value?.settings.revision, facts,
+    })
+    await refresh()
+    success.value = '已保存人工复核。'
+  })
+}
+
+function exclude(body: MatchingExclusion & { excluded: boolean }) {
+  return operate(async () => {
+    await http.post(`${base.value}/exclusions`, body)
+    await refresh()
+    success.value = body.excluded ? '已登记禁止组合。' : '已解除禁止组合。'
+  })
+}
+
+function saveKey(apiKey: string) {
+  return operate(async () => {
+    provider.value = (await http.put<ApiResponse<MatchingProvider>>('/admin/matching/deepseek', { apiKey })).data.data
+    success.value = '密钥已加密保存。'
+  })
+}
+
+function clearKey() {
+  if (!window.confirm('移除 DeepSeek 密钥后，本平台将暂停外发分析。确认移除？')) return
+  return operate(async () => {
+    provider.value = (await http.delete<ApiResponse<MatchingProvider>>('/admin/matching/deepseek')).data.data
+    success.value = '已移除密钥。'
+  })
+}
+
+function testKey() {
+  return operate(async () => {
+    await http.post('/admin/matching/deepseek/test', undefined, { timeout: 32_000 })
+    success.value = 'DeepSeek 示例文本测试通过。'
+  })
+}
+
+function preview() {
+  const settings = workspace.value?.settings
+  if (!settings || !canPreview.value) return
+  if (!settings.revision) { tab.value = 'rules'; return }
+  const replaced = draft.value
+  if (replaced && !window.confirm('重新试算会替换当前草稿。原方案及人工调整可在轮次记录中查看。继续？')) return
+  return operate(async () => {
+    await http.post(`${base.value}/preview`, { revision: settings.revision, replaceRoundId: replaced?.id, replaceRevision: replaced?.draftRevision },
+      { timeout: 35_000 })
+    await refresh()
+    success.value = '已生成试算，请复核组合和待安排名单。'
+  })
+}
+
+function rematch() {
+  return operate(async () => {
+    await http.post(`/admin/matching/periods/${periodId.value}/rematch`, undefined, { timeout: 35_000 })
+    await refresh()
+    success.value = '已为受拒绝影响的学生生成局部重匹配草稿。'
+  })
+}
+
+function adjust(body: { revision: number; removeId?: number; selectId?: number; reason: string }) {
+  if (!current.value || !editable.value) return
+  const id = current.value.round.id
+  return operate(async () => {
+    current.value = (await http.post<ApiResponse<MatchingRoundView>>(`/admin/matching/rounds/${id}/adjust`, body)).data.data
+    rounds.value = rounds.value.map(round => round.id === id ? current.value!.round : round)
+    success.value = '人工调整已保存，结果人数已更新。'
+  })
+}
+
+function discard() {
+  if (!current.value || !draftOpen.value || !window.confirm('确认放弃这份草稿？原方案及人工调整仍可在轮次记录中查看。')) return
+  const round = current.value.round
+  return operate(async () => {
+    await http.post(`/admin/matching/rounds/${round.id}/discard`, { revision: round.draftRevision, reason: '管理员在工作台放弃草稿' })
+    await refresh()
+    success.value = '草稿已移至轮次记录。'
+  })
+}
+
+function publish() {
+  if (!current.value || !canPublish.value) return
+  const round = current.value.round
+  const count = selectedPairs(current.value).length
+  if (!window.confirm(`确认发布 ${count} 组？发布后草稿将锁定，学生在双方确认阶段查看并确认。`)) return
+  return operate(async () => {
+    await http.post(`/admin/matching/rounds/${round.id}/publish`, undefined, { params: { revision: round.draftRevision } })
+    await refresh()
+    success.value = '匹配已发布。学生在双方确认阶段查看结果。'
+  })
+}
+
+function inspect(round: MatchingRound) {
+  return operate(async () => {
+    historical.value = await fetchData<MatchingRoundView>(`${base.value}/rounds/${round.id}`)
+  })
+}
+
+onMounted(async () => {
+  try {
+    [periods.value, provider.value] = await Promise.all([
+      fetchData<Period[]>('/periods'), fetchData<MatchingProvider>('/admin/matching/deepseek'),
+    ])
+    periodId.value = periods.value.find(item => ['MATCHING', 'CONFIRMATION', 'REVIEW'].includes(item.status))?.id ?? periods.value[0]?.id
+    await loadPeriod()
+  } catch (exception) {
+    error.value = apiErrorMessage(exception)
+  } finally {
+    loading.value = false
+  }
+})
 </script>
+
 <template>
-  <div class="page-actions matching-toolbar"><select v-model.number="periodId" @change="load"><option v-for="period in periods" :key="period.id" :value="period.id">{{ period.name }} · {{ labelOf(period.status) }}</option></select><button class="button secondary" :disabled="running || !periodId || !canRun" :title="canRun ? '' : '普通匹配只允许在匹配阶段运行'" @click="run">{{ running ? '计算中…' : '运行匹配' }}</button><button v-if="canRematch" class="button secondary" :disabled="running || !periodId" @click="rematch">局部重新匹配</button><button class="button primary" :disabled="running || !canEditRound || !selected.length || items.some(i => i.status === 'PUBLISHED' || i.status === 'CONFIRMED')" @click="publish">确认并发布 {{ selected.length }} 组</button></div>
-  <div class="notice">普通匹配只在匹配阶段运行；学生拒绝后，管理员可在双方确认阶段进行局部重新匹配。算法只使用审核通过且已加入匹配池的学生，系统不会自动发布。</div><div v-if="error" class="notice danger">{{ error }}</div><div v-if="success" class="notice success">{{ success }}</div>
-  <div v-if="loading" class="loading-state">正在加载候选组合…</div><div v-else-if="!items.length" class="empty-state card"><h3>当前还没有匹配方案</h3><p>普通匹配需处于匹配阶段；局部重匹配需处于双方确认阶段且已有学生拒绝。</p></div>
-  <section v-else class="card"><header><div><h2>候选匹配方案</h2><p>蓝色标记为本轮拟发布组合，可人工选择其他候选进行调整</p></div><span class="tag">第 {{ roundId }} 轮 · {{ items.length }} 个候选</span></header><div class="table-wrap"><table><thead><tr><th>候选双方</th><th>相似课程</th><th>总分</th><th>得分解释</th><th>状态</th><th>调整</th></tr></thead><tbody><tr v-for="item in items" :key="item.id" :class="{ 'selected-row': item.status === 'SELECTED' || item.status === 'PUBLISHED' || item.status === 'CONFIRMED' }"><td><strong>{{ item.navigatorName }}</strong>（领航）<small>{{ item.navigatorGrade }} 级 · {{ item.navigatorMajor }}</small><br /><strong>{{ item.climberName }}</strong>（攀登）<small>{{ item.climberGrade }} 级 · {{ item.climberMajor }}</small></td><td><span v-for="subject in item.matchedSubjects" :key="subject" class="tag">{{ subject }}</span></td><td><strong class="score-value">{{ item.totalScore ?? '—' }}</strong></td><td><details><summary>六项明细</summary><ul class="compact-list"><li v-for="(detail, key) in item.scoreDetail || {}" :key="key">{{ labelOf(String(key)) }}：{{ detail.score }}/{{ detail.max }}<small>{{ detail.explanation }}</small></li></ul></details></td><td><span class="status-badge" :class="item.status.toLowerCase()">{{ labelOf(item.status) }}</span><small>{{ labelOf(item.navigatorDecision) }} / {{ labelOf(item.climberDecision) }}</small></td><td><button class="button small secondary" :disabled="item.status !== 'GENERATED' || !canEditRound" @click="choose(item)">选择此组合</button></td></tr></tbody></table></div></section>
+  <div class="workbench-toolbar">
+    <label>活动期次<select v-model="periodId" :disabled="busy || loading" @change="loadPeriod"><option v-for="item in periods" :key="item.id" :value="item.id">{{ item.name }} · {{ labelOf(item.status) }}</option></select></label>
+    <button class="button ghost small" :disabled="busy || loading || !periodId" @click="operate(refresh)">刷新工作台</button>
+  </div>
+  <nav class="workbench-tabs" aria-label="智能匹配工作台">
+    <button v-for="item in tabs" :key="item.id" class="button small" :class="tab === item.id ? 'primary' : 'ghost'"
+      :aria-pressed="tab === item.id" :disabled="busy" @click="tab = item.id">{{ item.title }}</button>
+  </nav>
+  <div v-if="error" class="notice danger" role="alert">{{ error }}</div>
+  <div v-if="success" class="notice success" role="status">{{ success }}</div>
+  <div v-if="progress" class="notice" role="status">{{ progress }}</div>
+  <div v-if="loading" class="loading-state">正在加载匹配工作台…</div>
+  <div v-else-if="workspace">
+    <MatchingRulesEditor v-show="tab === 'rules'" :settings="workspace.settings" :editable="canEditRules" :busy="busy" @save="saveRules" />
+    <MatchingEvidencePanel v-show="tab === 'evidence'" :workspace="workspace" :provider="provider" :editable="canEditEvidence" :busy="busy"
+      @analyze="analyze" @review="review" @exclude="exclude" @save-key="saveKey" @clear-key="clearKey" @test-key="testKey" />
+    <div v-if="tab === 'trial'">
+      <div class="notice">
+        <strong>先试算，再人工检查并发布</strong>
+        <p v-if="!canPreview && !canRematch && !current">本期可在报名审核阶段准备规则和依据，进入匹配阶段后生成草稿。</p>
+        <p v-else>所有方案按同一套入池、占用与排除规则校验。进入双方确认阶段后可处理拒绝并局部重匹配。</p>
+      </div>
+      <div class="workbench-tabs">
+        <button v-if="canPreview" class="button secondary" :disabled="busy" @click="preview">{{ workspace.settings.revision ? '生成试算' : '先保存本期规则' }}</button>
+        <button v-if="canRematch" class="button secondary" :disabled="busy || Boolean(draft)" @click="rematch">局部重新匹配</button>
+        <button v-if="draftOpen" class="button ghost" :disabled="busy" @click="discard">放弃草稿</button>
+        <button v-if="draftOpen" class="button primary" :disabled="busy || !canPublish" @click="publish">复核并确认发布 {{ selectedPairs(current).length }} 组</button>
+      </div>
+      <div v-if="stale && draftOpen" class="notice warning" role="status">规则或依据已更新。请重新试算后再调整和发布。局部重匹配草稿可放弃后重算。</div>
+      <MatchingRoundPanel v-if="current" :view="current" :previous="previous" :students="workspace.students" :editable="editable" :busy="busy" @adjust="adjust" />
+    </div>
+    <div v-if="tab === 'history'">
+      <section class="card">
+        <header><div><h2>轮次记录</h2><p>保留历史方案、使用的规则和人工调整。</p></div></header>
+        <div class="card-body">
+          <p v-if="!rounds.length" class="muted">还没有匹配轮次。</p>
+          <div v-for="round in rounds" :key="round.id" class="history-row">
+            <div><strong>第 {{ round.roundNo }} 轮</strong> · {{ round.roundType === 'LOCAL_REMATCH' ? '局部重匹配' : '普通匹配' }}
+              · {{ round.status === 'DRAFT' ? '草稿' : round.status === 'PUBLISHED' ? '已发布' : '已被替换' }}</div>
+            <button class="button ghost small" :disabled="busy" @click="inspect(round)">查看方案</button>
+          </div>
+        </div>
+      </section>
+      <MatchingRulesEditor v-if="historical?.policy" :settings="{ policy: historical.policy, revision: historical.round.workspaceRevision ?? 0 }" :editable="false" :busy="false" />
+      <MatchingRoundPanel v-if="historical" :view="historical" :students="workspace.students" :editable="false" :busy="busy" />
+    </div>
+  </div>
 </template>
+
+<style scoped>
+.workbench-toolbar,.workbench-tabs,.history-row { display:flex; flex-wrap:wrap; gap:8px; align-items:end; }
+.workbench-tabs { margin:10px 0; }
+.workbench-toolbar select { min-width:0; max-width:100%; }
+.workbench-toolbar label { min-width:0; }
+.history-row { justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--line); }
+</style>

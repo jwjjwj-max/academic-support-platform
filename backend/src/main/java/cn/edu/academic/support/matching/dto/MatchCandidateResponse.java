@@ -10,5 +10,6 @@ public record MatchCandidateResponse(
         Long navigatorApplicationId, Long navigatorUserId, String navigatorName, String navigatorMajor, Integer navigatorGrade,
         Long climberApplicationId, Long climberUserId, String climberName, String climberMajor, Integer climberGrade,
         String navigatorDecision, String climberDecision, String rejectionReason,
-        String partnerWechat, String partnerPhone, Long supportPairId
+        String partnerWechat, String partnerPhone, Long supportPairId,
+        String matchKind, Map<String, Object> coverage, Boolean manuallySelected
 ) {}
