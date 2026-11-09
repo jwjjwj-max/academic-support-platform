@@ -2,11 +2,11 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { http } from '@/services/http'
-import type { MatchingPolicy, MatchingRound, MatchingWorkspace } from '@/types/api'
+import type { MatchingPolicy, MatchingRound, MatchingStudent, MatchingWorkspace } from '@/types/api'
 import MatchingManageView from './MatchingManageView.vue'
 
 vi.mock('@/services/http', () => ({
-  http: { get: vi.fn(), put: vi.fn() },
+  http: { get: vi.fn(), put: vi.fn(), post: vi.fn() },
   apiErrorMessage: () => '请求失败',
 }))
 
@@ -21,13 +21,15 @@ const makeRound = (roundNo: number, status: MatchingRound['status']): MatchingRo
 })
 let workspace: MatchingWorkspace
 let rounds: MatchingRound[]
+let providerConfigured: boolean
 
 beforeEach(() => {
   workspace = { settings: { revision: 1, policy: structuredClone(policy) }, students: [], exclusions: [] }
   rounds = [makeRound(2, 'DRAFT'), makeRound(1, 'SUPERSEDED')]
+  providerConfigured = false
   vi.mocked(http.get).mockImplementation(async url => {
     const data = url === '/periods' ? [{ id: 1, name: '本期', status: 'MATCHING' }]
-      : url === '/admin/matching/deepseek' ? { encryptionReady: true, configured: false, model: '示例' }
+      : url === '/admin/matching/deepseek' ? { encryptionReady: true, configured: providerConfigured, model: '示例' }
       : url === base ? workspace
       : url === `${base}/rounds` ? rounds
       : { round: rounds.find(round => url.endsWith(`/${round.id}`)), policy, participantIds: [], candidates: [], adjustments: [] }
@@ -85,5 +87,32 @@ it('saves outbound permission independently of an unfinished matching rule edit'
   expect(http.put).toHaveBeenLastCalledWith(`${base}/policy`, {
     revision: 2, policy: { ...policy, freshmanGrade: 2027, allowExternalAnalysis: true, rules: policy.rules.map(rule => ({ ...rule, maximumPairs: null })) },
   })
+  wrapper.unmount()
+})
+
+it('continues a batch past a changed preview and reports which item needs attention', async () => {
+  providerConfigured = true
+  workspace.settings.policy.allowExternalAnalysis = true
+  workspace.students = [1, 2].map((id): MatchingStudent => ({
+    id, revision: 1, grade: 2026, role: 'CLIMBER', name: `测试学生${id}`, studentNo: `TEST${id}`,
+    statement: '合成原文', externalPreview: `脱敏预览${id}`, subjects: [], pairingClue: false,
+  }))
+  vi.mocked(http.post).mockReset()
+  vi.mocked(http.post).mockRejectedValueOnce({ isAxiosError: true, response: { data: { code: 'MATCHING_PREVIEW_CHANGED' } } })
+  vi.mocked(http.post).mockResolvedValueOnce({})
+  const wrapper = mount(MatchingManageView)
+  await flushPromises()
+  await wrapper.findAll('button').find(item => item.text() === 'DeepSeek 分析')!.trigger('click')
+  const [confirm, analyze] = wrapper.findAll('.batch-actions button')
+  await confirm.trigger('click')
+  expect(http.post).not.toHaveBeenCalled()
+  await analyze.trigger('click')
+  await flushPromises()
+  expect(http.post).toHaveBeenCalledTimes(2)
+  expect(http.post).toHaveBeenLastCalledWith(`${base}/students/2/analyze`, {
+    applicationRevision: 1, confirmedPreview: '脱敏预览2',
+  }, { timeout: 32_000 })
+  expect(wrapper.get('[role="alert"]').text()).toContain('1 份分析未完成')
+  expect(wrapper.get('.evidence-row').text()).toContain('分析未完成')
   wrapper.unmount()
 })

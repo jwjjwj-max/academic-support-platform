@@ -8,6 +8,7 @@ const props = defineProps<{
   editable: boolean
   permissionEditable: boolean
   busy: boolean
+  analysisFailures?: Record<number, string>
 }>()
 const emit = defineEmits<{
   analyze: [students: MatchingStudent[]]
@@ -35,11 +36,20 @@ const visible = computed(() => {
 })
 const canSend = computed(() => props.editable && props.workspace.settings.policy.allowExternalAnalysis &&
   props.provider?.configured && props.provider.encryptionReady)
-const queue = computed(() => props.workspace.students.filter(student =>
-  approved.value.includes(approvalKey(student)) && !student.evidence && student.externalPreview))
+const pendingVisible = computed(() => visible.value.filter(student => !student.evidence && student.externalPreview?.trim()))
+const queue = computed(() => pendingVisible.value.filter(student => approved.value.includes(approvalKey(student))))
 
 function approvalKey(student: MatchingStudent) {
   return `${student.id}:${student.revision}:${student.externalPreview ?? ''}`
+}
+
+function confirmVisible() {
+  if (!canSend.value || props.busy) return
+  approved.value = [...new Set([...approved.value, ...pendingVisible.value.map(approvalKey)])]
+}
+
+function analyzeConfirmed() {
+  if (canSend.value && !props.busy && queue.value.length) emit('analyze', queue.value)
 }
 
 function review(student: MatchingStudent) {
@@ -92,12 +102,39 @@ function saveKey() {
       <p v-else-if="!workspace.settings.policy.allowExternalAnalysis" class="muted">本期外发分析尚未启用，可在「连接与外发设置」开启，或直接人工复核自述。</p>
       <div v-if="workspace.students.length" class="evidence-toolbar">
         <input v-model="keyword" type="search" aria-label="查找自述" placeholder="按姓名或学号查找" />
-        <button class="button primary small" :disabled="busy || !canSend || !queue.length" @click="emit('analyze', queue)">分析选中自述 {{ queue.length }} 份</button>
       </div>
+      <section v-if="workspace.students.length" class="batch-analysis" aria-label="批量分析">
+        <div>
+          <h3>批量确认与分析</h3>
+          <p role="status">当前筛选可确认 {{ pendingVisible.length }} 份 · 已确认 {{ queue.length }} 份</p>
+          <p class="muted">核对本批脱敏预览后可一键确认。点「开始批量分析」才会将已确认的预览发送给 DeepSeek。</p>
+        </div>
+        <div class="batch-actions">
+          <button type="button" class="button secondary" :disabled="busy || !canSend || queue.length === pendingVisible.length" @click="confirmVisible">
+            一键确认脱敏预览
+          </button>
+          <button type="button" class="button primary" :disabled="busy || !canSend || !queue.length" @click="analyzeConfirmed">
+            开始批量分析（{{ queue.length }} 份）
+          </button>
+        </div>
+        <details v-if="pendingVisible.length" class="batch-preview">
+          <summary>集中查看本批脱敏预览（{{ pendingVisible.length }} 份）</summary>
+          <ul>
+            <li v-for="student in pendingVisible" :key="student.id">
+              <strong>{{ student.name }} · {{ student.studentNo }}</strong>
+              <p class="statement">{{ student.externalPreview }}</p>
+              <label v-if="canSend" class="evidence-check">
+                <input v-model="approved" type="checkbox" :value="approvalKey(student)" :disabled="busy" />
+                确认 {{ student.name }} 的预览可发送
+              </label>
+            </li>
+          </ul>
+        </details>
+      </section>
       <p v-if="workspace.students.length && !visible.length" class="muted">没有符合条件的入池报名。</p>
       <details v-for="student in visible" :key="student.id" class="evidence-row">
         <summary>{{ student.name }} · {{ student.studentNo }} · {{ student.grade }} 级
-          <span class="tag">{{ student.evidence?.reviewed ? '人工已复核' : student.evidence ? '已提取' : '待处理' }}</span>
+          <span class="tag">{{ student.evidence?.reviewed ? '人工已复核' : student.evidence ? '已提取' : analysisFailures?.[student.id] ? '分析未完成' : '待处理' }}</span>
           <span v-if="student.pairingClue" class="tag">有约组线索</span>
         </summary>
         <div class="grid two">
@@ -110,6 +147,7 @@ function saveKey() {
           </div>
         </div>
         <p>报名科目 · {{ student.subjects.join('、') }}</p>
+        <p v-if="!student.evidence && analysisFailures?.[student.id]" class="text-danger">{{ analysisFailures[student.id] }}</p>
         <dl v-if="student.evidence && opened !== student.id" class="detail-list">
           <div v-for="field in factFields" :key="field.key">
             <dt>{{ field.title }}</dt>
@@ -143,6 +181,16 @@ function saveKey() {
 .evidence-toolbar,.connection-actions { display:flex; gap:8px; align-items:end; flex-wrap:wrap; }
 .permission-actions { display:flex; gap:8px 12px; align-items:center; flex-wrap:wrap; margin-top:12px; }
 .evidence-toolbar input { width:auto; min-width:0; max-width:100%; }
+.batch-analysis { display:grid; gap:10px; padding:16px; border:1px solid var(--line); border-radius:8px; background:#f8fafc; }
+.batch-analysis h3,.batch-analysis p { margin:0; }
+.batch-analysis h3 { font-size:18px; }
+.batch-analysis h3 + p { margin:6px 0 3px; font-weight:650; }
+.batch-actions { display:flex; flex-wrap:wrap; gap:10px; }
+.batch-actions .button { min-height:46px; padding:10px 18px; font-size:16px; }
+.batch-preview ul { list-style:none; padding:0; margin:8px 0 0; }
+.batch-preview li { border-top:1px solid var(--line); padding:10px 0; }
+.batch-preview li p { margin:5px 0; }
+@media (max-width:540px) { .batch-actions > button { width:100%; } }
 .evidence-row { border-top:1px solid var(--line); padding-top:10px; min-width:0; }
 .statement { display:block; white-space:pre-wrap; overflow-wrap:anywhere; }
 .evidence-check { display:flex; align-items:center; }

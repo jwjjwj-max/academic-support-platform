@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { isAxiosError } from 'axios'
 import MatchingEvidencePanel from '@/components/MatchingEvidencePanel.vue'
 import MatchingExclusionsPanel from '@/components/MatchingExclusionsPanel.vue'
 import MatchingRoundPanel from '@/components/MatchingRoundPanel.vue'
@@ -26,6 +27,7 @@ const rounds = ref<MatchingRound[]>([])
 const current = ref<MatchingRoundView>()
 const previous = ref<MatchingRoundView>()
 const historical = ref<MatchingRoundView>()
+const analysisFailures = ref<Record<number, string>>({})
 const loading = ref(true), busy = ref(false), error = ref(''), success = ref(''), progress = ref('')
 let readSequence = 0
 
@@ -70,6 +72,7 @@ async function refresh() {
 async function loadPeriod() {
   if (!periodId.value) return
   historical.value = undefined
+  analysisFailures.value = {}
   workspace.value = undefined
   current.value = undefined
   rounds.value = []
@@ -119,17 +122,35 @@ function saveExternalPermission(allowExternalAnalysis: boolean) {
 function analyze(students: MatchingStudent[]) {
   return operate(async () => {
     let done = 0
+    let skipped = 0
     try {
-      for (const student of students) {
-        progress.value = `正在分析第 ${done + 1} / ${students.length} 份自述`
-        await http.post(`${base.value}/students/${student.id}/analyze`, {
-          applicationRevision: student.revision, confirmedPreview: student.externalPreview,
-        }, { timeout: 32_000 })
-        done++
+      for (const [index, student] of students.entries()) {
+        progress.value = `正在分析第 ${index + 1} / ${students.length} 份自述`
+        try {
+          await http.post(`${base.value}/students/${student.id}/analyze`, {
+            applicationRevision: student.revision, confirmedPreview: student.externalPreview,
+          }, { timeout: 32_000 })
+          delete analysisFailures.value[student.id]
+          done++
+        } catch (exception) {
+          const message = apiErrorMessage(exception)
+          analysisFailures.value[student.id] = message
+          const code = isAxiosError<ApiResponse<unknown>>(exception) ? exception.response?.data?.code : undefined
+          if (!code || ![
+            'MATCHING_ANALYSIS_IN_PROGRESS', 'MATCHING_VERSION_CONFLICT', 'MATCHING_PREVIEW_CHANGED',
+            'MATCHING_STUDENT_NOT_IN_POOL', 'MATCHING_EVIDENCE_EMPTY', 'INVALID_MATCHING_EVIDENCE',
+            'INVALID_MATCHING_QUOTE', 'MATCHING_TOPIC_NOT_GROUNDED',
+          ].includes(code)) {
+            error.value = `${message}。批量分析已暂停，尚有 ${students.length - index - 1} 份未尝试。`
+            break
+          }
+          skipped++
+        }
       }
     } finally {
       await refresh()
-      if (done) success.value = `已完成 ${done} 份自述分析，可复核提取结果。`
+      if (done) success.value = `已完成 ${done} 份自述分析。`
+      if (skipped) error.value = `${error.value}${skipped} 份分析未完成，可展开对应报名查看原因。`
     }
   })
 }
@@ -269,7 +290,7 @@ onMounted(async () => {
     </section>
     <section v-show="tab === 'evidence'" aria-label="DeepSeek 分析" data-panel="evidence">
       <MatchingEvidencePanel :workspace="workspace" :provider="provider" :editable="canEditEvidence"
-        :permission-editable="canEditRules" :busy="busy" @analyze="analyze" @review="review"
+        :permission-editable="canEditRules" :busy="busy" :analysis-failures="analysisFailures" @analyze="analyze" @review="review"
         @save-permission="saveExternalPermission" @save-key="saveKey" @clear-key="clearKey" @test-key="testKey" />
     </section>
     <section v-if="tab === 'trial'" aria-label="试算与发布" data-panel="trial">
