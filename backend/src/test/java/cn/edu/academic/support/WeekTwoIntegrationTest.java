@@ -414,11 +414,46 @@ class WeekTwoIntegrationTest {
     }
 
     @Test
+    void surplusSeniorMentorsHelpFreshmenBeforePeerStudyWithoutCourseEvidence() {
+        AuthenticatedUser admin = actor(createUser("peer-study-admin", "ADMIN", "结对管理员"));
+        ActivityPeriod period = createPeriod(admin.id(), "MATCHING", "大一结对学习");
+        long periodId = period.getId();
+        var senior = createParticipant(periodId, "peer-study-senior", "大三领航者", "NAVIGATOR", 2024,
+                new BigDecimal("4.00"), "线性代数", "fixture");
+        var regularClimber = createParticipant(periodId, "peer-study-regular", "大三攀登者", "CLIMBER", 2024,
+                new BigDecimal("2.00"), "线性代数", "fixture");
+        var surplusSenior = createParticipant(periodId, "peer-study-surplus", "剩余大三领航者", "NAVIGATOR", 2024,
+                new BigDecimal("4.00"), "英语听说", "fixture");
+        var freshman = workbenchStudent(periodId, "peer-study-freshman", "需要英语帮助", "英语听说");
+        var first = workbenchStudent(periodId, "peer-study-first", "甲同学", "高等数学");
+        var second = workbenchStudent(periodId, "peer-study-second", "乙同学", "高数");
+        var third = workbenchStudent(periodId, "peer-study-third", "丙同学", "线性代数");
+        var fourth = workbenchStudent(periodId, "peer-study-fourth", "丁同学", "程序设计基础");
+        workspace.savePolicy(admin, periodId, 0, MatchingPolicy.defaults(2026), request());
+        workspace.setExclusion(admin, periodId, first.getId(), third.getId(), true, "已核实私下约组", request());
+
+        var draft = matchingService.preview(admin, periodId, 2, null, null, request());
+        assertThat(draft.candidates().stream().filter(pair -> "SELECTED".equals(pair.status())))
+                .extracting(pair -> List.of(pair.navigatorApplicationId(), pair.climberApplicationId()))
+                .containsExactlyInAnyOrder(List.of(senior.getId(), regularClimber.getId()),
+                        List.of(surplusSenior.getId(), freshman.getId()), List.of(first.getId(), second.getId()),
+                        List.of(third.getId(), fourth.getId()));
+        assertThat(draft.candidates()).noneMatch(pair -> pair.navigatorApplicationId().equals(first.getId())
+                && pair.climberApplicationId().equals(third.getId()));
+        assertThat(draft.candidates().stream().filter(pair -> "PEER".equals(pair.matchKind()) && "SELECTED".equals(pair.status())))
+                .allSatisfy(pair -> assertThat(pair.matchedSubjects()).isEmpty())
+                .anySatisfy(pair -> assertThat(pair.coverage()).containsEntry("sharedStudySubjects", List.of("高等数学")))
+                .anySatisfy(pair -> assertThat(pair.coverage()).containsEntry("sharedStudySubjects", List.of()));
+    }
+
+    @Test
     void workbenchOptimizesMutualHelpAndAuditsConflictingManualChanges() {
         AuthenticatedUser admin = actor(createUser("workspace-admin", "ADMIN", "匹配管理员"));
         ActivityPeriod period = createPeriod(admin.id(), "MATCHING", "互助工作台");
         long periodId = period.getId();
-        workspace.savePolicy(admin, periodId, 0, MatchingPolicy.defaults(2026), request());
+        var rules = MatchingPolicy.defaults(2026).rules();
+        var strictPeer = new MatchingPolicy.Rule(MatchingPolicy.Kind.PEER, true, 1, null, false, false);
+        workspace.savePolicy(admin, periodId, 0, new MatchingPolicy(2026, false, List.of(strictPeer, rules.get(0), rules.get(1))), request());
         var a = workbenchStudent(periodId, "peer-a", "甲同学", "英语听说");
         var b = workbenchStudent(periodId, "peer-b", "乙同学", "C语言");
         var c = workbenchStudent(periodId, "peer-c", "丙同学", "C语言");

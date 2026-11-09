@@ -23,7 +23,10 @@ onMounted(load)
 <template>
   <div v-if="error" class="notice danger">{{ error }}</div><div v-if="success" class="notice success">{{ success }}</div>
   <div v-if="loading" class="loading-state">正在加载匹配结果…</div><div v-else-if="!items.length" class="empty-state card"><h3>暂无已发布的匹配结果</h3><p>匹配方案经管理员确认并发布后才会在这里显示。</p></div>
-  <article v-for="item in items" :key="item.id" class="card"><header><div><span class="tag">{{ matchKindLabel(item.matchKind) }}</span><h2>{{ item.status === 'CONFIRMED' ? '正式帮扶对' : item.status === 'REJECTED' ? '已拒绝的组合' : '待双方确认' }}</h2><p>覆盖科目：{{ item.matchedSubjects.join('、') }} · 匹配依据仅管理员可见</p></div></header><div class="card-body">
+  <article v-for="item in items" :key="item.id" class="card"><header><div><span class="tag">{{ matchKindLabel(item.matchKind) }}</span><h2>{{ item.status === 'CONFIRMED' ? '正式帮扶对' : item.status === 'REJECTED' ? '已拒绝的组合' : '待双方确认' }}</h2>
+    <p v-if="item.matchedSubjects.length">覆盖科目 · {{ item.matchedSubjects.join('、') }} · 匹配依据仅管理员可见</p>
+    <p v-else-if="item.matchKind === 'PEER'">结对共同学习 · 学习主题由双方商定</p>
+  </div></header><div class="card-body">
     <div class="grid two"><div class="metric-card"><span>{{ item.matchKind === 'PEER' ? '互助成员' : '领航者' }}</span><strong>{{ item.navigatorName }}</strong><small>{{ item.navigatorGrade }} 级 · {{ item.navigatorMajor }} · {{ labelOf(item.navigatorDecision) }}</small></div><div class="metric-card"><span>{{ item.matchKind === 'PEER' ? '互助成员' : '攀登者' }}</span><strong>{{ item.climberName }}</strong><small>{{ item.climberGrade }} 级 · {{ item.climberMajor }} · {{ labelOf(item.climberDecision) }}</small></div></div>
     <div v-if="item.status === 'CONFIRMED'" class="notice success"><strong>双方已确认，联系方式已开放</strong><p>微信：{{ item.partnerWechat }}<br />联系电话：{{ item.partnerPhone || '对方未填写' }}</p></div>
     <div v-else-if="item.status === 'PUBLISHED' && myDecision(item) === 'PENDING' && canStudentDecide(periodStatus(item))" class="form-actions"><button class="button danger" @click="decide(item, 'REJECTED')">拒绝并填写原因</button><button class="button primary" :disabled="submitting" @click="decide(item, 'CONFIRMED')">确认结对</button></div>

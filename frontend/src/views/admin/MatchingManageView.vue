@@ -333,9 +333,10 @@ onMounted(async () => {
           <ol class="compact-list">
             <li v-for="rule in historical.policy.rules" :key="rule.kind">
               <strong>{{ matchKindLabel(rule.kind) }}</strong>
-              <template v-if="rule.enabled"> · {{ rule.kind === 'PEER' ? '每个方向' : '' }}至少覆盖 {{ rule.minimumCoverage }} 门 · {{ rule.maximumPairs == null ? '组数不限' : `最多 ${rule.maximumPairs} 组` }}</template>
+              <template v-if="rule.enabled"> · {{ rule.kind === 'PEER' && rule.minimumCoverage === 0 ? '可无课程依据结对' : `${rule.kind === 'PEER' ? '每个方向' : ''}至少覆盖 ${rule.minimumCoverage} 门` }} · {{ rule.maximumPairs == null ? '组数不限' : `最多 ${rule.maximumPairs} 组` }}</template>
               <template v-else> · 未启用</template>
               <small v-if="rule.enabled && rule.kind === 'REGULAR'">{{ rule.allowOlderNavigator ? '允许更高年级领航' : '仅同年级领航' }} · {{ rule.requireHigherGpa ? '要求领航者绩点更高' : '未设置绩点差门槛' }}</small>
+              <small v-if="rule.enabled && rule.kind === 'FRESHMAN_SUPPORT'">{{ rule.allowOlderNavigator ? '允许大二及大三领航者' : '仅允许大二领航者' }}</small>
             </li>
           </ol>
         </details>

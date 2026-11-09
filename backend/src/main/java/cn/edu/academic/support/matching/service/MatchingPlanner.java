@@ -36,7 +36,7 @@ final class MatchingPlanner {
     record Coverage(String course, String knowledgePoint, String offerQuote, String needQuote) {}
 
     record Basis(List<Coverage> firstToSecond, List<Coverage> secondToFirst,
-                 List<String> firstUncovered, List<String> secondUncovered) {}
+                 List<String> firstUncovered, List<String> secondUncovered, List<String> sharedStudySubjects) {}
 
     record Candidate(Participant first, Participant second, Rule rule, int order, Basis basis, int quality) {
         List<String> subjects() {
@@ -67,10 +67,15 @@ final class MatchingPlanner {
                     boolean peer = rule.kind() == Kind.PEER;
                     Direction reverse = peer ? coverage(b, a) : new Direction(List.of(), List.of());
                     if (peer && reverse.covered.size() < rule.minimumCoverage()) continue;
+                    List<String> shared = peer && rule.minimumCoverage() == 0 ? sharedStudySubjects(a, b) : List.of();
                     int quality = peer ? 2 * Math.min(forward.ratio(), reverse.ratio()) + forward.ratio() + reverse.ratio()
                             : forward.ratio() * 4;
+                    if (peer && rule.minimumCoverage() == 0) {
+                        int supportedDirections = (forward.covered.isEmpty() ? 0 : 1) + (reverse.covered.isEmpty() ? 0 : 1);
+                        quality = 1000 * supportedDirections + quality / 4 + Math.min(shared.size(), 8);
+                    }
                     candidates.add(new Candidate(a, b, rule, order,
-                            new Basis(forward.covered, reverse.covered, reverse.uncovered, forward.uncovered), quality));
+                            new Basis(forward.covered, reverse.covered, reverse.uncovered, forward.uncovered, shared), quality));
                 }
             }
         }
@@ -82,10 +87,18 @@ final class MatchingPlanner {
             return a.grade == freshman && b.grade == freshman && a.id() < b.id();
         }
         if (!a.navigator() || b.navigator()) return false;
-        if (rule.kind() == Kind.FRESHMAN_SUPPORT) return a.grade == freshman - 1 && b.grade == freshman;
+        if (rule.kind() == Kind.FRESHMAN_SUPPORT) {
+            return b.grade == freshman && (a.grade == freshman - 1 || rule.allowOlderNavigator() && a.grade == freshman - 2);
+        }
         boolean eligibleGrade = b.grade < freshman && (a.grade == b.grade || rule.allowOlderNavigator() && a.grade < b.grade);
         return eligibleGrade && (!rule.requireHigherGpa()
                 || a.application.getCumulativeGpa().compareTo(b.application.getCumulativeGpa()) > 0);
+    }
+
+    private static List<String> sharedStudySubjects(Participant first, Participant second) {
+        Map<String, Topic> secondNeeds = topics(second, false);
+        return topics(first, false).entrySet().stream().filter(entry -> secondNeeds.containsKey(entry.getKey()))
+                .map(entry -> entry.getValue().course()).toList();
     }
 
     private static Direction coverage(Participant helper, Participant learner) {

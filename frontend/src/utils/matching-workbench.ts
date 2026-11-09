@@ -1,7 +1,7 @@
 import type { MatchCandidate, MatchKind, MatchingRoundView } from '@/types/api'
 
 const labels: Record<MatchKind, string> = {
-  PEER: '大一双向互助', REGULAR: '高年级常规帮扶', FRESHMAN_SUPPORT: '大二补位大一', LEGACY: '领航帮扶',
+  PEER: '大一结对学习', REGULAR: '高年级常规帮扶', FRESHMAN_SUPPORT: '高年级领航大一', LEGACY: '领航帮扶',
 }
 
 export function matchKindLabel(kind?: MatchKind) {

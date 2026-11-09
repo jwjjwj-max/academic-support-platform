@@ -98,9 +98,11 @@ public class MatchingWorkspace {
         checkRevision(revision, before.revision());
         if (policy.rules().stream().map(MatchingPolicy.Rule::kind).distinct().count() != MatchingPolicy.Kind.values().length
                 || policy.rules().stream().noneMatch(MatchingPolicy.Rule::enabled)
-                || policy.rules().stream().anyMatch(rule -> rule.kind() != MatchingPolicy.Kind.REGULAR &&
-                (rule.allowOlderNavigator() || rule.requireHigherGpa()))) {
-            throw new BusinessException("INVALID_MATCHING_RULES", "三种规则须各出现一次且至少启用一项，年级扩展和绩点门槛仅用于常规帮扶");
+                || policy.rules().stream().anyMatch(rule ->
+                (rule.kind() != MatchingPolicy.Kind.REGULAR && rule.requireHigherGpa())
+                        || (rule.kind() == MatchingPolicy.Kind.PEER && rule.allowOlderNavigator())
+                        || (rule.kind() != MatchingPolicy.Kind.PEER && rule.minimumCoverage() == 0))) {
+            throw new BusinessException("INVALID_MATCHING_RULES", "三种规则须各出现一次且至少启用一项。仅大一结对可将课程门槛设为 0，仅常规帮扶可要求绩点差");
         }
         PolicyVersion after = new PolicyVersion(before.revision() + 1, policy);
         writePolicy(periodId, before, after);

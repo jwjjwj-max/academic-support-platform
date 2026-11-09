@@ -137,6 +137,7 @@ export interface MatchCoverage {
   secondToFirst: MatchCoverageItem[]
   firstUncovered: string[]
   secondUncovered: string[]
+  sharedStudySubjects?: string[]
 }
 export interface MatchingRule {
   kind: Exclude<MatchKind, 'LEGACY'>

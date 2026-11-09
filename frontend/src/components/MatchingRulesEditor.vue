@@ -39,7 +39,7 @@ function save() {
       <fieldset v-for="(rule, index) in draft.rules" :key="rule.kind" class="rule-fieldset" :disabled="!editable || busy">
         <legend>{{ index + 1 }}. {{ matchKindLabel(rule.kind) }}</legend>
         <div class="form-grid">
-          <label>{{ rule.kind === 'PEER' ? '每个方向至少覆盖的课程数' : '至少覆盖的课程数' }}<input v-model.number="rule.minimumCoverage" type="number" min="1" max="8" required /></label>
+          <label>{{ rule.kind === 'PEER' ? '每个方向至少覆盖的课程数' : '至少覆盖的课程数' }}<input v-model.number="rule.minimumCoverage" type="number" :min="rule.kind === 'PEER' ? 0 : 1" max="8" required /></label>
           <label>最多组数<input v-model.number="rule.maximumPairs" type="number" min="0" max="200" placeholder="留空表示不限" /></label>
           <div class="rule-checks">
             <label class="check"><input v-model="rule.enabled" type="checkbox" />启用</label>
@@ -47,7 +47,11 @@ function save() {
               <label class="check"><input v-model="rule.allowOlderNavigator" type="checkbox" />允许更高年级领航</label>
               <label class="check"><input v-model="rule.requireHigherGpa" type="checkbox" />要求领航者累计绩点更高</label>
             </template>
-            <p v-else class="muted">按课程与能力证据匹配，适用于暂无成绩的新生。</p>
+            <template v-else-if="rule.kind === 'FRESHMAN_SUPPORT'">
+              <label class="check"><input v-model="rule.allowOlderNavigator" type="checkbox" />同时允许大三领航者</label>
+              <p class="muted">大二领航者可参加，按能够帮扶的课程匹配。</p>
+            </template>
+            <p v-else class="muted">设为 0 时，没有课程依据也可结对，优先参考互补依据和共同学习科目。</p>
           </div>
           <div class="form-actions">
             <button type="button" class="button ghost small" :disabled="index === 0" @click="move(index, -1)">上移</button>

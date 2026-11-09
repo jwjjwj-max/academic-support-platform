@@ -18,7 +18,7 @@ public record MatchingPolicy(
     public record Rule(
             @NotNull Kind kind,
             boolean enabled,
-            @Min(1) @Max(8) int minimumCoverage,
+            @Min(0) @Max(8) int minimumCoverage,
             @Min(0) @Max(200) Integer maximumPairs,
             boolean allowOlderNavigator,
             boolean requireHigherGpa
@@ -26,8 +26,8 @@ public record MatchingPolicy(
 
     public static MatchingPolicy defaults(int freshmanGrade) {
         return new MatchingPolicy(freshmanGrade, false, List.of(
-                new Rule(Kind.PEER, true, 1, null, false, false),
                 new Rule(Kind.REGULAR, true, 1, null, true, true),
-                new Rule(Kind.FRESHMAN_SUPPORT, true, 1, null, false, false)));
+                new Rule(Kind.FRESHMAN_SUPPORT, true, 1, null, true, false),
+                new Rule(Kind.PEER, true, 0, null, false, false)));
     }
 }

@@ -98,7 +98,8 @@ function pendingReason(id: number) {
     <div class="card-body round-panel">
       <div class="round-summary" role="status">
         <div><strong>{{ occupied.size }}<template v-if="view.policy"> / {{ view.participantIds.length }}</template></strong><small>方案覆盖人数</small></div>
-        <div v-if="view.policy"><strong>{{ selected.filter(pair => pair.matchKind === 'PEER').length }} 组</strong><small>大一互助</small></div>
+        <div v-if="view.policy"><strong>{{ selected.filter(pair => pair.matchKind === 'FRESHMAN_SUPPORT').length }} 组</strong><small>高年级带大一</small></div>
+        <div v-if="view.policy"><strong>{{ selected.filter(pair => pair.matchKind === 'PEER').length }} 组</strong><small>大一结对</small></div>
         <div v-if="view.policy"><strong>{{ waiting.length }} 人</strong><small>待安排</small></div>
       </div>
       <div class="table-actions round-actions" aria-label="结果视图">
@@ -116,7 +117,9 @@ function pendingReason(id: number) {
             </div>
             <button v-if="editable" class="button ghost small" :disabled="busy" @click="open(pair)">调整组合</button>
           </div>
-          <p class="muted">覆盖科目 · {{ pair.matchedSubjects.join('、') }}</p>
+          <p v-if="pair.matchedSubjects.length" class="muted">覆盖科目 · {{ pair.matchedSubjects.join('、') }}</p>
+          <p v-if="pair.coverage?.sharedStudySubjects?.length" class="muted">共同学习科目 · {{ pair.coverage.sharedStudySubjects.join('、') }}</p>
+          <p v-else-if="pair.matchKind === 'PEER' && !pair.matchedSubjects.length" class="muted">结对共同学习 · 学习主题由双方商定</p>
           <details>
             <summary>{{ pair.coverage ? '查看依据' : '查看历史评分' }}</summary>
             <div v-if="pair.coverage" class="grid two basis">
@@ -177,7 +180,7 @@ function pendingReason(id: number) {
           <option v-if="editing.pair" value="dissolve">拆组，双方回到待安排</option>
         </select></label>
         <div v-if="impact" class="notice warning" role="status">
-          <p v-if="replacement">组建 · {{ pairName(replacement) }}（{{ replacement.matchedSubjects.join('、') }}）</p>
+          <p v-if="replacement">组建 · {{ pairName(replacement) }}<template v-if="replacement.matchedSubjects.length">（{{ replacement.matchedSubjects.join('、') }}）</template></p>
           <p v-if="impact.removed.length">解除 · {{ impact.removed.map(pairName).join('；') }}</p>
           <p v-if="impact.returned.length">回到待安排 · {{ impact.returned.map(personName).join('、') }}</p>
         </div>
