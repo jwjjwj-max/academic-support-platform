@@ -19,6 +19,13 @@ const emit = defineEmits<{
   testKey: []
 }>()
 const keyword = ref('')
+const statusFilters = [
+  { id: 'all', label: '全部' },
+  { id: 'extracted', label: '已提取' },
+  { id: 'pending', label: '未提取' },
+  { id: 'failed', label: '本次未完成' },
+] as const
+const statusFilter = ref<typeof statusFilters[number]['id']>('all')
 const apiKey = ref('')
 const opened = ref<number>()
 const editor = ref<MatchingFacts>()
@@ -29,11 +36,16 @@ watch(() => props.workspace.settings.policy.allowExternalAnalysis, allowed => {
 }, { immediate: true })
 const factFields = [{ key: 'needs', title: '需要帮助' }, { key: 'offers', title: '可以提供帮助' }] as const
 const analyzed = computed(() => props.workspace.students.filter(student => student.evidence).length)
-const visible = computed(() => {
+const grouped = computed(() => {
   const search = keyword.value.trim().toLowerCase()
-  return props.workspace.students.filter(student => !search ||
+  const all = props.workspace.students.filter(student => !search ||
     student.name.toLowerCase().includes(search) || student.studentNo.toLowerCase().includes(search))
+  const extracted = all.filter(student => student.evidence)
+  const pending = all.filter(student => !student.evidence)
+  const failed = pending.filter(student => props.analysisFailures?.[student.id])
+  return { all, extracted, pending, failed }
 })
+const visible = computed(() => grouped.value[statusFilter.value])
 const canSend = computed(() => props.editable && props.workspace.settings.policy.allowExternalAnalysis &&
   props.provider?.configured && props.provider.encryptionReady)
 const pendingVisible = computed(() => visible.value.filter(student => !student.evidence && student.externalPreview?.trim()))
@@ -102,8 +114,14 @@ function saveKey() {
       <p v-else-if="!workspace.settings.policy.allowExternalAnalysis" class="muted">本期外发分析尚未启用，可在「连接与外发设置」开启，或直接人工复核自述。</p>
       <div v-if="workspace.students.length" class="evidence-toolbar">
         <input v-model="keyword" type="search" aria-label="查找自述" placeholder="按姓名或学号查找" />
+        <div class="evidence-status-filters" role="group" aria-label="提取状态">
+          <button v-for="filter in statusFilters" :key="filter.id" type="button" class="button"
+            :class="statusFilter === filter.id ? 'primary' : 'ghost'" :aria-pressed="statusFilter === filter.id"
+            :disabled="busy" @click="statusFilter = filter.id">{{ filter.label }} {{ grouped[filter.id].length }}</button>
+        </div>
       </div>
-      <section v-if="workspace.students.length" class="batch-analysis" aria-label="批量分析">
+      <p v-if="statusFilter === 'extracted' && visible.length" class="muted">包含 DeepSeek 提取和人工录入或复核的依据。</p>
+      <section v-if="pendingVisible.length" class="batch-analysis" aria-label="批量分析">
         <div>
           <h3>批量确认与分析</h3>
           <p role="status">当前筛选可确认 {{ pendingVisible.length }} 份 · 已确认 {{ queue.length }} 份</p>
@@ -131,10 +149,11 @@ function saveKey() {
           </ul>
         </details>
       </section>
-      <p v-if="workspace.students.length && !visible.length" class="muted">没有符合条件的入池报名。</p>
+      <p v-if="workspace.students.length && !visible.length" class="muted" role="status">当前搜索和提取状态下没有报名。</p>
       <details v-for="student in visible" :key="student.id" class="evidence-row">
         <summary>{{ student.name }} · {{ student.studentNo }} · {{ student.grade }} 级
           <span class="tag">{{ student.evidence?.reviewed ? '人工已复核' : student.evidence ? '已提取' : analysisFailures?.[student.id] ? '分析未完成' : '待处理' }}</span>
+          <span v-if="!student.evidence && !student.externalPreview?.trim()" class="tag">无可外发预览</span>
           <span v-if="student.pairingClue" class="tag">有约组线索</span>
         </summary>
         <div class="grid two">
@@ -181,6 +200,8 @@ function saveKey() {
 .evidence-toolbar,.connection-actions { display:flex; gap:8px; align-items:end; flex-wrap:wrap; }
 .permission-actions { display:flex; gap:8px 12px; align-items:center; flex-wrap:wrap; margin-top:12px; }
 .evidence-toolbar input { width:auto; min-width:0; max-width:100%; }
+.evidence-status-filters { display:flex; flex-wrap:wrap; gap:6px; }
+.evidence-status-filters button { min-height:40px; }
 .batch-analysis { display:grid; gap:10px; padding:16px; border:1px solid var(--line); border-radius:8px; background:#f8fafc; }
 .batch-analysis h3,.batch-analysis p { margin:0; }
 .batch-analysis h3 { font-size:18px; }
