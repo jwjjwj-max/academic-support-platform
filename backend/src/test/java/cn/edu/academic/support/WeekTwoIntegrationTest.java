@@ -384,6 +384,9 @@ class WeekTwoIntegrationTest {
         int originalVersion = workspace.view(periodId).settings().revision();
         var initial = matchingService.preview(admin, periodId, originalVersion, null, null, request());
         assertThat(initial.candidates()).isEmpty();
+        assertThat(initial.participants()).extracting(MatchingService.RoundParticipant::id)
+                .containsExactlyInAnyOrder(higher.getId(), lower.getId());
+        assertThat(initial.participants()).allMatch(student -> !student.studentNo().isBlank());
         assertThat(applicationService.listForAdmin(periodId, null)).allMatch(item -> Boolean.TRUE.equals(item.roleChangeAllowed()));
 
         var change = new ApplicationRoleCorrectionRequest(0, "NAVIGATOR", List.of("线性代数"), "核对领航资格和科目");

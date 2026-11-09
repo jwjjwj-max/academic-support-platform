@@ -29,9 +29,10 @@ const view: MatchingRoundView = {
 
 it('shows both displaced partners and sends the revision and reason for manual replacement', async () => {
   const wrapper = mount(MatchingRoundPanel, { props: { view, students, editable: true, busy: false } })
+  expect(wrapper.get('table[aria-label="方案组合名单"]').text()).toContain('学生1（TEST1）')
   await wrapper.findAll('button').find(button => button.text() === '调整组合')!.trigger('click')
   await wrapper.get('dialog select').setValue('3')
-  expect(wrapper.get('dialog').text()).toContain('回到待安排 · 学生2、学生4')
+  expect(wrapper.get('dialog').text()).toContain('回到待安排 · 学生2（TEST2）、学生4（TEST4）')
   expect(wrapper.get('dialog button.primary').attributes('disabled')).toBeDefined()
   await wrapper.get('dialog textarea').setValue('核实后调整空闲时间')
   await wrapper.get('dialog form').trigger('submit')
@@ -39,4 +40,21 @@ it('shows both displaced partners and sends the revision and reason for manual r
   await wrapper.setProps({ editable: false })
   expect(wrapper.find('dialog').exists()).toBe(false)
   expect(wrapper.text()).not.toContain('调整组合')
+})
+
+it('opens on the waiting table and reads names and numbers from the round when students leave the current pool', async () => {
+  const historical = {
+    ...view,
+    candidates: [pair(1, 1, 2, 'PUBLISHED')],
+    participants: students,
+  }
+  const wrapper = mount(MatchingRoundPanel, { props: { view: historical, students: [], historical: true, editable: false, busy: false } })
+  const table = wrapper.get('table[aria-label="待安排名单"]')
+  expect(table.findAll('tbody tr').map(row => row.findAll('td').map(cell => cell.text()))).toEqual([
+    ['学生3', 'TEST3', '该轮未安排'], ['学生4', 'TEST4', '该轮未安排'],
+  ])
+  await wrapper.get('button[aria-pressed="false"]').trigger('click')
+  const pairTable = wrapper.get('table[aria-label="方案组合名单"]')
+  expect(pairTable.text()).toContain('学生1（TEST1）')
+  expect(pairTable.text()).toContain('学生2（TEST2）')
 })

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import type { MatchCandidate, MatchingRoundView, MatchingStudent } from '@/types/api'
-import { adjustmentImpact, matchKindLabel, members, pairName, selectedPairs } from '@/utils/matching-workbench'
+import { adjustmentImpact, matchKindLabel, members, selectedPairs } from '@/utils/matching-workbench'
 import { labelOf } from '@/utils/labels'
 
 const props = defineProps<{
@@ -14,16 +14,22 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ adjust: [data: { revision: number; removeId?: number; selectId?: number; reason: string }] }>()
 const filter = ref<'selected' | 'waiting' | 'diff'>('selected')
-const resultTabs = computed(() => ([
-  { id: 'selected', text: '方案组合' }, { id: 'waiting', text: '待安排' }, { id: 'diff', text: '与上轮对比' },
-] as const).filter(entry => !props.historical || entry.id !== 'diff'))
+const expandedPair = ref<number>()
 const editing = ref<{ pair?: MatchCandidate; student?: MatchingStudent }>()
 const choice = ref<number | 'dissolve' | ''>('')
 const reason = ref('')
 const selected = computed(() => selectedPairs(props.view))
 const people = computed(() => new Map(props.students.map(student => [student.id, student])))
+const identities = computed(() => new Map([
+  ...props.students, ...(props.previous?.participants ?? []), ...(props.view.participants ?? []),
+].map(student => [student.id, student])))
 const occupied = computed(() => new Set(selected.value.flatMap(members)))
 const waiting = computed(() => props.view.participantIds.filter(id => !occupied.value.has(id)))
+const resultTabs = computed(() => ([
+  { id: 'waiting', text: `待安排（${waiting.value.length} 人）`, visible: !!props.view.policy },
+  { id: 'selected', text: `方案组合（${selected.value.length} 组）`, visible: true },
+  { id: 'diff', text: '与上轮对比', visible: !props.historical },
+] as const).filter(entry => entry.visible))
 const compatible = computed(() => {
   const byStudent = new Map<number, MatchCandidate[]>()
   for (const pair of props.view.candidates) {
@@ -55,6 +61,10 @@ const changes = computed(() => {
   ]
 })
 watch(() => [props.view.round.id, props.view.round.draftRevision, props.editable], () => { editing.value = undefined })
+watch(() => props.view.round.id, () => {
+  filter.value = props.view.policy && waiting.value.length ? 'waiting' : 'selected'
+  expandedPair.value = undefined
+}, { immediate: true })
 
 function open(pair?: MatchCandidate, student?: MatchingStudent) {
   editing.value = { pair, student }
@@ -68,15 +78,19 @@ function save() {
     selectId: replacement.value?.id, reason: reason.value.trim() })
 }
 
-function personName(id: number) {
-  const participant = people.value.get(id)
-  if (participant) return participant.name
-  const pair = props.view.candidates.find(item => members(item).includes(id))
-  return pair ? (pair.navigatorApplicationId === id ? pair.navigatorName : pair.climberName) : `报名 #${id}`
+function personIdentity(id: number, fallback = `报名 #${id}`) {
+  const participant = identities.value.get(id)
+  return participant ? `${participant.name}（${participant.studentNo}）` : fallback
+}
+
+function pairIdentity(pair: MatchCandidate) {
+  const first = personIdentity(pair.navigatorApplicationId, pair.navigatorName)
+  const second = personIdentity(pair.climberApplicationId, pair.climberName)
+  return `${first} ${pair.matchKind === 'PEER' ? '↔' : '→'} ${second}`
 }
 
 function namesForCandidateIds(ids: number[]) {
-  const map = new Map(props.view.candidates.map(pair => [pair.id, pairName(pair)]))
+  const map = new Map(props.view.candidates.map(pair => [pair.id, pairIdentity(pair)]))
   return ids.map(id => map.get(id) ?? `组合 #${id}`).join('；') || '无'
 }
 
@@ -97,31 +111,42 @@ function pendingReason(id: number) {
     </header>
     <div class="card-body round-panel">
       <div class="round-summary" role="status">
-        <div><strong>{{ occupied.size }}<template v-if="view.policy"> / {{ view.participantIds.length }}</template></strong><small>方案覆盖人数</small></div>
-        <div v-if="view.policy"><strong>{{ selected.filter(pair => pair.matchKind === 'FRESHMAN_SUPPORT').length }} 组</strong><small>高年级带大一</small></div>
-        <div v-if="view.policy"><strong>{{ selected.filter(pair => pair.matchKind === 'PEER').length }} 组</strong><small>大一结对</small></div>
-        <div v-if="view.policy"><strong>{{ waiting.length }} 人</strong><small>待安排</small></div>
+        <span>方案覆盖 {{ occupied.size }}<template v-if="view.policy"> / {{ view.participantIds.length }}</template> 人</span>
+        <template v-if="view.policy">
+          <span>高年级带大一 {{ selected.filter(pair => pair.matchKind === 'FRESHMAN_SUPPORT').length }} 组</span>
+          <span>大一结对 {{ selected.filter(pair => pair.matchKind === 'PEER').length }} 组</span>
+        </template>
       </div>
       <div class="table-actions round-actions" aria-label="结果视图">
         <button v-for="entry in resultTabs"
           :key="entry.id" class="button small" :class="filter === entry.id ? 'secondary' : 'ghost'" :aria-pressed="filter === entry.id"
-          :disabled="entry.id === 'waiting' && !view.policy" @click="filter = entry.id">{{ entry.text }}</button>
+          @click="filter = entry.id">{{ entry.text }}</button>
       </div>
       <template v-if="filter === 'selected'">
         <p v-if="!selected.length" class="muted">本轮尚未安排组合，请查看待安排名单。</p>
-        <article v-for="pair in selected" :key="pair.id" class="result-row">
-          <div class="round-header">
-            <div><h3>{{ pairName(pair) }}</h3><p><span class="tag">{{ matchKindLabel(pair.matchKind) }}</span>
-              <span v-if="pair.manuallySelected" class="tag">人工调整</span>
-              <span v-if="view.round.status === 'PUBLISHED'" class="tag">{{ labelOf(pair.status) }}</span></p>
-            </div>
-            <button v-if="editable" class="button ghost small" :disabled="busy" @click="open(pair)">调整组合</button>
-          </div>
-          <p v-if="pair.matchedSubjects.length" class="muted">覆盖科目 · {{ pair.matchedSubjects.join('、') }}</p>
-          <p v-if="pair.coverage?.sharedStudySubjects?.length" class="muted">共同学习科目 · {{ pair.coverage.sharedStudySubjects.join('、') }}</p>
-          <p v-else-if="pair.matchKind === 'PEER' && !pair.matchedSubjects.length" class="muted">结对共同学习 · 学习主题由双方商定</p>
-          <details>
-            <summary>{{ pair.coverage ? '查看依据' : '查看历史评分' }}</summary>
+        <div v-else class="table-wrap"><table class="match-table" aria-label="方案组合名单">
+          <thead><tr><th scope="col">成员一</th><th scope="col">成员二</th><th scope="col">匹配类型</th><th scope="col">学习科目</th><th scope="col">操作</th></tr></thead>
+          <tbody><template v-for="pair in selected" :key="pair.id">
+            <tr>
+              <td class="identity">{{ personIdentity(pair.navigatorApplicationId, pair.navigatorName) }}</td>
+              <td class="identity">{{ personIdentity(pair.climberApplicationId, pair.climberName) }}</td>
+              <td>{{ matchKindLabel(pair.matchKind) }}
+                <small v-if="pair.manuallySelected">人工调整</small>
+                <small v-if="view.round.status === 'PUBLISHED'">{{ labelOf(pair.status) }}</small>
+              </td>
+              <td>
+                <div v-if="pair.matchedSubjects.length">覆盖 · {{ pair.matchedSubjects.join('、') }}</div>
+                <div v-if="pair.coverage?.sharedStudySubjects?.length">共学 · {{ pair.coverage.sharedStudySubjects.join('、') }}</div>
+                <div v-else-if="pair.matchKind === 'PEER' && !pair.matchedSubjects.length" class="muted">双方商定</div>
+              </td>
+              <td><div class="table-actions round-actions">
+                <button class="button ghost small" :aria-expanded="expandedPair === pair.id" @click="expandedPair = expandedPair === pair.id ? undefined : pair.id">
+                  {{ expandedPair === pair.id ? '收起详情' : pair.coverage ? '查看依据' : '查看历史评分' }}
+                </button>
+                <button v-if="editable" class="button ghost small" :disabled="busy" @click="open(pair)">调整组合</button>
+              </div></td>
+            </tr>
+            <tr v-if="expandedPair === pair.id" class="detail-row"><td colspan="5">
             <div v-if="pair.coverage" class="grid two basis">
               <div v-for="direction in [
                 { name: `${pair.navigatorName} → ${pair.climberName}`, items: pair.coverage.firstToSecond, uncovered: pair.coverage.secondUncovered },
@@ -138,25 +163,36 @@ function pendingReason(id: number) {
             </div>
             <ul v-else class="compact-list"><li v-for="(detail, key) in pair.scoreDetail" :key="key">{{ labelOf(String(key)) }} · {{ detail.score }}/{{ detail.max }}<small>{{ detail.explanation }}</small></li></ul>
             <div v-if="!historical && people.get(pair.navigatorApplicationId) && people.get(pair.climberApplicationId)" class="grid two basis">
-              <div v-for="id in members(pair)" :key="id"><strong>{{ personName(id) }}的报名自述</strong><p>{{ people.get(id)?.statement }}</p></div>
+              <div v-for="id in members(pair)" :key="id"><strong>{{ personIdentity(id) }}的报名自述</strong><p>{{ people.get(id)?.statement }}</p></div>
             </div>
-          </details>
-        </article>
+            </td></tr>
+          </template></tbody>
+        </table></div>
       </template>
       <template v-else-if="filter === 'waiting'">
         <p v-if="!waiting.length" class="muted">本轮可安排的报名均已覆盖。</p>
-        <div v-for="id in waiting" :key="id" class="result-row round-header">
-          <div><strong>{{ personName(id) }}</strong><p class="muted">{{ pendingReason(id) }}</p></div>
-          <button v-if="editable && people.get(id) && compatible.get(id)?.some(pair => adjustmentImpact(view, undefined, pair).valid)"
-            class="button secondary small" :disabled="busy" @click="open(undefined, people.get(id))">手动组队</button>
-        </div>
+        <div v-else class="table-wrap"><table class="match-table" aria-label="待安排名单">
+          <thead><tr><th scope="col">姓名</th><th scope="col">学号</th><th scope="col">未匹配原因</th><th v-if="editable" scope="col">操作</th></tr></thead>
+          <tbody><tr v-for="id in waiting" :key="id">
+            <td class="identity"><strong>{{ identities.get(id)?.name ?? `报名 #${id}` }}</strong></td>
+            <td class="identity student-number">{{ identities.get(id)?.studentNo ?? '—' }}</td>
+            <td>{{ pendingReason(id) }}</td>
+            <td v-if="editable"><button v-if="people.get(id) && compatible.get(id)?.some(pair => adjustmentImpact(view, undefined, pair).valid)"
+              class="button secondary small" :disabled="busy" @click="open(undefined, people.get(id))">手动组队</button></td>
+          </tr></tbody>
+        </table></div>
       </template>
       <template v-else>
         <p v-if="!previous" class="muted">尚无上一轮方案可对比。</p>
         <template v-else>
           <p>对比第 {{ previous.round.roundNo }} 轮，组合数 {{ selectedPairs(previous).length }} → {{ selected.length }}</p>
           <p v-if="!changes.length" class="muted">组合无变化。</p>
-          <div v-for="entry in changes" :key="`${entry.action}-${entry.pair.id}`" class="result-row">{{ entry.action }} · {{ pairName(entry.pair) }}</div>
+          <div v-else class="table-wrap"><table class="match-table" aria-label="与上轮对比">
+            <thead><tr><th scope="col">变化</th><th scope="col">组合</th><th scope="col">匹配类型</th></tr></thead>
+            <tbody><tr v-for="entry in changes" :key="`${entry.action}-${entry.pair.id}`">
+              <td>{{ entry.action }}</td><td>{{ pairIdentity(entry.pair) }}</td><td>{{ matchKindLabel(entry.pair.matchKind) }}</td>
+            </tr></tbody>
+          </table></div>
         </template>
       </template>
       <details v-if="view.adjustments.length">
@@ -172,17 +208,17 @@ function pendingReason(id: number) {
   </section>
   <dialog v-if="editing" open class="modal" aria-label="人工调整组合">
     <form @submit.prevent="save">
-      <header><h2>{{ editing.pair ? `调整 ${pairName(editing.pair)}` : `为${editing.student?.name}手动组队` }}</h2></header>
+      <header><h2>{{ editing.pair ? `调整 ${pairIdentity(editing.pair)}` : `为 ${personIdentity(editing.student!.id)} 手动组队` }}</h2></header>
       <div class="modal-body">
         <label>调整为<select v-model="choice" required :disabled="busy">
           <option value="" disabled>请选择调整方式</option>
-          <option v-for="pair in options" :key="pair.id" :value="pair.id">{{ pairName(pair) }} · {{ matchKindLabel(pair.matchKind) }}</option>
+          <option v-for="pair in options" :key="pair.id" :value="pair.id">{{ pairIdentity(pair) }} · {{ matchKindLabel(pair.matchKind) }}</option>
           <option v-if="editing.pair" value="dissolve">拆组，双方回到待安排</option>
         </select></label>
         <div v-if="impact" class="notice warning" role="status">
-          <p v-if="replacement">组建 · {{ pairName(replacement) }}<template v-if="replacement.matchedSubjects.length">（{{ replacement.matchedSubjects.join('、') }}）</template></p>
-          <p v-if="impact.removed.length">解除 · {{ impact.removed.map(pairName).join('；') }}</p>
-          <p v-if="impact.returned.length">回到待安排 · {{ impact.returned.map(personName).join('、') }}</p>
+          <p v-if="replacement">组建 · {{ pairIdentity(replacement) }}<template v-if="replacement.matchedSubjects.length">（{{ replacement.matchedSubjects.join('、') }}）</template></p>
+          <p v-if="impact.removed.length">解除 · {{ impact.removed.map(pairIdentity).join('；') }}</p>
+          <p v-if="impact.returned.length">回到待安排 · {{ impact.returned.map(id => personIdentity(id)).join('、') }}</p>
         </div>
         <label>调整原因<textarea v-model.trim="reason" required maxlength="500" :disabled="busy" /></label>
       </div>
@@ -194,13 +230,13 @@ function pendingReason(id: number) {
 
 <style scoped>
 .round-panel { display:grid; gap:10px; }
-.round-summary,.round-header { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:10px; }
-.round-summary { justify-content:flex-start; gap:12px 28px; }
-.round-summary strong,.round-summary small { display:block; }
-.round-summary strong { font-size:20px; }
+.round-summary { display:flex; flex-wrap:wrap; gap:4px 20px; font-size:13px; color:var(--muted); }
 .round-actions { flex-wrap:wrap; }
+.match-table th,.match-table td { padding:9px 10px; }
+.match-table th,.match-table .identity,.match-table button { white-space:nowrap; }
+.match-table .student-number { font-variant-numeric:tabular-nums; }
+.detail-row { background:#f8fafc; }
 .result-row { border-top:1px solid var(--line); padding:10px 0; }
-.result-row h3,.result-row p { margin:4px 0; }
 .basis { overflow-wrap:anywhere; white-space:pre-wrap; }
 .basis.grid { margin:8px 0; }
 .basis p { margin:4px 0; }

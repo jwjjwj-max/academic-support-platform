@@ -185,6 +185,7 @@ export interface MatchingRoundView {
   round: MatchingRound
   policy?: MatchingPolicy
   participantIds: number[]
+  participants?: Array<Pick<MatchingStudent, 'id' | 'name' | 'studentNo'>>
   candidates: MatchCandidate[]
   adjustments: Array<{ administrator: string; reason: string; time: string; before: number[]; after: number[] }>
 }

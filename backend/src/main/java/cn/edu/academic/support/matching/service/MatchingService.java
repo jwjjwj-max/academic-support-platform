@@ -59,8 +59,10 @@ public class MatchingService {
                                Integer draftRevision, LocalDateTime createdAt, LocalDateTime publishedAt) {}
     public record AdjustmentLog(String administrator, String reason, LocalDateTime time,
                                 List<Long> before, List<Long> after) {}
+    public record RoundParticipant(long id, String name, String studentNo) {}
     public record RoundView(RoundSummary round, MatchingPolicy policy, List<Long> participantIds,
-                            List<MatchCandidateResponse> candidates, List<AdjustmentLog> adjustments) {}
+                            List<MatchCandidateResponse> candidates, List<AdjustmentLog> adjustments,
+                            List<RoundParticipant> participants) {}
     private record RuleSnapshot(MatchingPolicy policy, List<Long> participantIds) {}
 
     private static final Map<String, String> SUBJECT_ALIASES = Map.ofEntries(
@@ -298,7 +300,16 @@ public class MatchingService {
                         .eq(OperationLog::getTargetId, round.getId().toString()).orderByDesc(OperationLog::getId))
                 .stream().map(log -> new AdjustmentLog(log.getActorLogin(), log.getReason(), log.getCreatedAt(),
                         readIds(log.getBeforeSnapshot()), readIds(log.getAfterSnapshot()))).toList();
-        return new RoundView(summary(round), snapshot.policy(), snapshot.participantIds(), adminCandidates(round), adjustments);
+        var candidates = adminCandidates(round);
+        Set<Long> ids = new HashSet<>(snapshot.participantIds());
+        for (var candidate : candidates) {
+            ids.add(candidate.navigatorApplicationId());
+            ids.add(candidate.climberApplicationId());
+        }
+        List<RoundParticipant> participants = ids.isEmpty() ? List.of() : snapshotMapper.selectList(
+                Wrappers.<ApplicationProfileSnapshot>lambdaQuery().in(ApplicationProfileSnapshot::getApplicationId, ids)).stream()
+                .map(profile -> new RoundParticipant(profile.getApplicationId(), profile.getRealName(), profile.getStudentNo())).toList();
+        return new RoundView(summary(round), snapshot.policy(), snapshot.participantIds(), candidates, adjustments, participants);
     }
 
     private List<Long> readIds(String value) {

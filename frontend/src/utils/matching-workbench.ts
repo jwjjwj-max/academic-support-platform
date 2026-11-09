@@ -12,10 +12,6 @@ export function members(pair: MatchCandidate) {
   return [pair.navigatorApplicationId, pair.climberApplicationId]
 }
 
-export function pairName(pair: MatchCandidate) {
-  return `${pair.navigatorName} ${pair.matchKind === 'PEER' ? '↔' : '→'} ${pair.climberName}`
-}
-
 export function selectedPairs(view?: MatchingRoundView | null) {
   return view?.candidates.filter(pair => ['SELECTED', 'PUBLISHED', 'CONFIRMED', 'REJECTED'].includes(pair.status)) ?? []
 }
