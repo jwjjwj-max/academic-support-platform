@@ -3,6 +3,7 @@ package cn.edu.academic.support.application.service;
 import cn.edu.academic.support.application.dto.ApplicationCorrectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationResponse;
 import cn.edu.academic.support.application.dto.ApplicationReviewRequest;
+import cn.edu.academic.support.application.dto.ApplicationRoleCorrectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationSelectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationSubmitRequest;
 import cn.edu.academic.support.application.mapper.ApplicationProfileSnapshotMapper;
@@ -13,6 +14,7 @@ import cn.edu.academic.support.application.model.ApplicationReviewHistory;
 import cn.edu.academic.support.application.model.ParticipationApplication;
 import cn.edu.academic.support.audit.service.AuditService;
 import cn.edu.academic.support.common.exception.BusinessException;
+import cn.edu.academic.support.matching.service.MatchingWorkspace;
 import cn.edu.academic.support.period.mapper.ActivityPeriodMapper;
 import cn.edu.academic.support.period.model.ActivityPeriod;
 import cn.edu.academic.support.security.AuthenticatedUser;
@@ -32,6 +34,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -54,6 +57,7 @@ public class ApplicationService {
     private final ActivityPeriodMapper periodMapper;
     private final ObjectMapper objectMapper;
     private final AuditService auditService;
+    private final MatchingWorkspace matchingWorkspace;
 
     public List<ApplicationResponse> mine(Long userId) {
         return applicationMapper.selectList(Wrappers.<ParticipationApplication>lambdaQuery()
@@ -64,13 +68,18 @@ public class ApplicationService {
 
     @Transactional(readOnly = true)
     public List<ApplicationResponse> listForAdmin(Long periodId, String status) {
+        Map<Long, ActivityPeriod> periods = new HashMap<>();
+        Map<Long, Boolean> roleWindows = new HashMap<>();
         return applicationMapper.selectList(Wrappers.<ParticipationApplication>lambdaQuery()
                         .eq(periodId != null, ParticipationApplication::getPeriodId, periodId)
                         .eq(status != null && !status.isBlank(), ParticipationApplication::getApplicationStatus, status)
                         .orderByAsc(ParticipationApplication::getSubmittedAt).orderByAsc(ParticipationApplication::getId))
                 .stream().map(application -> {
                     StudentProfile profile = profileMapper.selectById(application.getStudentUserId());
-                    return response(application, profile == null ? null : profile.getProfileVersion());
+                    ActivityPeriod period = periods.computeIfAbsent(application.getPeriodId(), periodMapper::selectById);
+                    boolean roleChangeAllowed = period != null && roleCorrectionStatusAllowed(application, period)
+                            && roleWindows.computeIfAbsent(period.getId(), ignored -> matchingWorkspace.allowsApplicationRoleCorrection(period));
+                    return response(application, period, profile == null ? null : profile.getProfileVersion(), roleChangeAllowed);
                 }).toList();
     }
 
@@ -98,6 +107,9 @@ public class ApplicationService {
         }
         if (resubmit && !"REVIEW".equals(period.getStatus())) {
             throw new BusinessException("RESUBMISSION_NOT_OPEN", "仅报名审核阶段允许被驳回学生修改重提");
+        }
+        if (resubmit && !existing.getParticipantRole().equals(request.participantRole())) {
+            throw new BusinessException("APPLICATION_ROLE_FIXED", "重提时请保留本期报名身份，如需调整请联系管理员");
         }
 
         ApplicationResponse before = resubmit ? response(existing) : null;
@@ -201,6 +213,40 @@ public class ApplicationService {
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
+    public ApplicationResponse correctRole(AuthenticatedUser actor, Long id, ApplicationRoleCorrectionRequest request,
+                                           HttpServletRequest servletRequest) {
+        ActivityPeriod period = lockApplicationPeriod(id);
+        ParticipationApplication application = applicationMapper.selectById(id);
+        requireRevision(application.getRevision(), request.revision());
+        if (!matchingWorkspace.allowsApplicationRoleCorrection(period)) {
+            throw new BusinessException("APPLICATION_ROLE_CORRECTION_CLOSED", "仅报名审核阶段和首次发布前的匹配阶段可调整身份");
+        }
+        if (!roleCorrectionStatusAllowed(application, period)) {
+            throw new BusinessException("APPLICATION_NOT_CORRECTABLE", "当前报名状态不能更正身份");
+        }
+        if (application.getParticipantRole().equals(request.participantRole())) {
+            throw new BusinessException("APPLICATION_ROLE_UNCHANGED", "请选择新的报名身份");
+        }
+        var before = roleFields(application);
+        application.setSubjectsJson(json(validateSubjects(request.subjects())));
+        application.setParticipantRole(request.participantRole());
+        saveRevision(application);
+        if ("MATCHING_POOL".equals(application.getSelectionStatus())) matchingWorkspace.invalidateForRoleCorrection(period);
+        auditService.log(actor, "APPLICATION_ROLE_CORRECTION", "APPLICATION", id, before, roleFields(application),
+                request.reason().strip(), servletRequest);
+        return response(application, period, null, true);
+    }
+
+    private boolean roleCorrectionStatusAllowed(ParticipationApplication application, ActivityPeriod period) {
+        return "REVIEW".equals(period.getStatus()) && CORRECTABLE.contains(application.getApplicationStatus())
+                || "MATCHING".equals(period.getStatus()) && "APPROVED".equals(application.getApplicationStatus());
+    }
+
+    private Map<String, Object> roleFields(ParticipationApplication application) {
+        return Map.of("participantRole", application.getParticipantRole(), "subjects", list(application.getSubjectsJson()));
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public ApplicationResponse select(AuthenticatedUser actor, Long id, ApplicationSelectionRequest request,
                                       HttpServletRequest servletRequest) {
         ParticipationApplication application = lockReviewApplication(id, "APPLICATION_SELECTION_NOT_OPEN", "设置入选状态");
@@ -296,11 +342,15 @@ public class ApplicationService {
         return period;
     }
 
-    private ParticipationApplication lockReviewApplication(Long id, String code, String action) {
+    private ActivityPeriod lockApplicationPeriod(Long id) {
         ParticipationApplication application = applicationMapper.selectOne(Wrappers.<ParticipationApplication>lambdaQuery()
                 .select(ParticipationApplication::getPeriodId).eq(ParticipationApplication::getId, id));
         if (application == null) throw new BusinessException("APPLICATION_NOT_FOUND", "报名记录不存在", HttpStatus.NOT_FOUND);
-        if (!"REVIEW".equals(lockPeriod(application.getPeriodId()).getStatus())) {
+        return lockPeriod(application.getPeriodId());
+    }
+
+    private ParticipationApplication lockReviewApplication(Long id, String code, String action) {
+        if (!"REVIEW".equals(lockApplicationPeriod(id).getStatus())) {
             throw new BusinessException(code, "仅报名审核阶段可以" + action);
         }
         return applicationMapper.selectById(id);
@@ -317,6 +367,11 @@ public class ApplicationService {
 
     private ApplicationResponse response(ParticipationApplication application, Integer currentProfileVersion) {
         ActivityPeriod period = periodMapper.selectById(application.getPeriodId());
+        return response(application, period, currentProfileVersion, null);
+    }
+
+    private ApplicationResponse response(ParticipationApplication application, ActivityPeriod period, Integer currentProfileVersion,
+                                         Boolean roleChangeAllowed) {
         ApplicationProfileSnapshot snapshot = snapshot(application.getId());
         return new ApplicationResponse(application.getId(), application.getPeriodId(), period == null ? "—" : period.getName(),
                 application.getStudentUserId(), snapshot == null ? "—" : snapshot.getStudentNo(),
@@ -325,7 +380,7 @@ public class ApplicationService {
                 application.getCumulativeGpa(), list(application.getSubjectsJson()), application.getStatementText(),
                 list(application.getLearningStylesJson()), list(application.getPersonalitiesJson()),
                 application.getApplicationStatus(), application.getSelectionStatus(), application.getRejectionReason(),
-                application.getSubmittedAt(), application.getReviewedAt(), application.getRevision(), currentProfileVersion);
+                application.getSubmittedAt(), application.getReviewedAt(), application.getRevision(), currentProfileVersion, roleChangeAllowed);
     }
 
     private List<String> validateSubjects(List<String> subjects) {

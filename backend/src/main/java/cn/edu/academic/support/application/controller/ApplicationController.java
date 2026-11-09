@@ -3,6 +3,7 @@ package cn.edu.academic.support.application.controller;
 import cn.edu.academic.support.application.dto.ApplicationCorrectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationResponse;
 import cn.edu.academic.support.application.dto.ApplicationReviewRequest;
+import cn.edu.academic.support.application.dto.ApplicationRoleCorrectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationSelectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationSubmitRequest;
 import cn.edu.academic.support.application.service.ApplicationService;
@@ -68,5 +69,14 @@ public class ApplicationController {
                                                       @Valid @RequestBody ApplicationSelectionRequest request,
                                                       HttpServletRequest servletRequest) {
         return ApiResponse.success(service.select(actor, id, request, servletRequest));
+    }
+
+    @PostMapping("/admin/applications/{id}/role-correction")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ApiResponse<ApplicationResponse> correctRole(@AuthenticationPrincipal AuthenticatedUser actor,
+                                                         @PathVariable Long id,
+                                                         @Valid @RequestBody ApplicationRoleCorrectionRequest request,
+                                                         HttpServletRequest servletRequest) {
+        return ApiResponse.success(service.correctRole(actor, id, request, servletRequest));
     }
 }

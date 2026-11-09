@@ -77,6 +77,10 @@ class WeekOneIntegrationTest {
                 .andExpect(status().isForbidden());
         mvc.perform(get("/admin/matching/periods/1/workspace").header("Authorization", bearer(token)))
                 .andExpect(status().isForbidden());
+        mvc.perform(post("/admin/applications/1/role-correction").header("Authorization", bearer(token))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"revision\":0,\"participantRole\":\"NAVIGATOR\",\"subjects\":[\"高等数学\"],\"reason\":\"复核\"}"))
+                .andExpect(status().isForbidden());
     }
 
     @Test

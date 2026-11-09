@@ -212,6 +212,22 @@ public class MatchingWorkspace {
                 Integer.class, periodId) > 0;
     }
 
+    public boolean allowsApplicationRoleCorrection(ActivityPeriod period) {
+        return List.of("REVIEW", "MATCHING").contains(period.getStatus()) && !hasPublished(period.getId());
+    }
+
+    // The caller holds the period lock shared with matching preview and publication.
+    public void invalidateForRoleCorrection(ActivityPeriod period) {
+        var current = policy(period);
+        if (current.revision() > 0) {
+            writePolicy(period.getId(), current, new PolicyVersion(current.revision() + 1, current.policy()));
+        }
+        jdbc.update("""
+                UPDATE match_round SET status='SUPERSEDED'
+                WHERE period_id=? AND status='DRAFT' AND policy_revision IS NULL
+                """, period.getId());
+    }
+
     private boolean publishedTogether(Long periodId, Key key) {
         return jdbc.queryForObject("""
                 SELECT COUNT(*) FROM match_candidate c JOIN match_round r ON c.round_id=r.id

@@ -9,7 +9,7 @@ onMounted(async()=>{try{items.value=(await http.get<ApiResponse<AuditLog[]>>('/a
 function correctionDetails(item: AuditLog) {
   const fields = {
     grade: '报名年级', major: '报名专业', cumulativeGpa: '报名累计平均绩点',
-    subjects: '帮扶科目', statementText: '报名自述', applicationStatus: '报名状态',
+    subjects: '帮扶科目', statementText: '报名自述', applicationStatus: '报名状态', participantRole: '报名身份',
   }
   try {
     const before = JSON.parse(item.beforeSnapshot || '{}')
@@ -41,11 +41,11 @@ function fieldValue(value: unknown) {
           <tr v-for="item in items" :key="item.id">
             <td>{{ new Date(item.createdAt).toLocaleString('zh-CN') }}</td>
             <td>{{ item.actorLogin }}</td>
-            <td>{{ item.action === 'APPLICATION_CORRECTION' ? '报名资料更正' : item.action }}</td>
+            <td>{{ item.action === 'APPLICATION_ROLE_CORRECTION' ? '报名身份更正' : item.action === 'APPLICATION_CORRECTION' ? '报名资料更正' : item.action }}</td>
             <td>{{ item.targetType }} {{ item.targetId }}</td>
             <td>
               {{ item.reason || '—' }}
-              <details v-if="item.action === 'APPLICATION_CORRECTION'">
+              <details v-if="['APPLICATION_CORRECTION', 'APPLICATION_ROLE_CORRECTION'].includes(item.action)">
                 <summary>查看修改前后</summary>
                 <ul class="compact-list correction-values">
                   <li v-for="field in correctionDetails(item)" :key="field.name">

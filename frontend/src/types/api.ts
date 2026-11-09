@@ -79,6 +79,7 @@ export interface ParticipationApplication {
   id: number
   revision: number
   currentProfileVersion?: number | null
+  roleChangeAllowed?: boolean
   periodId: number
   periodName: string
   studentUserId: number

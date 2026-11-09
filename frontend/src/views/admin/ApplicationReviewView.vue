@@ -40,6 +40,10 @@ const conflict = ref(false)
 const splitPending = ref(false)
 const correction = ref<{ grade: number | ''; major: string; cumulativeGpa: number | ''; subjects: string[]; statementText: string; reason: string } | null>(null)
 const showSubjectErrors = ref(false)
+const roleEdit = ref<{ item: ParticipationApplication; participantRole: ParticipationApplication['participantRole']; subjects: string[]; reason: string }>()
+const roleError = ref('')
+const roleSplitPending = ref(false)
+const showRoleSubjectErrors = ref(false)
 
 const selectedPeriod = computed(() => periods.value.find((item) => item.id === periodId.value))
 const permissions = computed(() => applicationAdminPermissions(selectedPeriod.value?.status))
@@ -53,6 +57,7 @@ let requestVersion = 0
 async function load(reopenId?: number) {
   const version = ++requestVersion
   target.value = null
+  roleEdit.value = undefined
   loading.value = true
   error.value = ''
   allApplications.value = []
@@ -180,6 +185,39 @@ async function saveCorrection(approve: boolean) {
   }
 }
 
+function openRoleCorrection(item: ParticipationApplication) {
+  if (!item.roleChangeAllowed) return
+  roleEdit.value = { item, participantRole: item.participantRole, subjects: [''], reason: '' }
+  roleError.value = ''
+  roleSplitPending.value = false
+  showRoleSubjectErrors.value = false
+}
+
+async function saveRoleCorrection() {
+  const draft = roleEdit.value
+  if (!draft || submitting.value || roleSplitPending.value || draft.participantRole === draft.item.participantRole) return
+  showRoleSubjectErrors.value = true
+  roleError.value = validateSubjects(draft.subjects)
+  if (roleError.value) return
+  if (!draft.reason.trim()) { roleError.value = '请填写身份更正原因'; return }
+  submitting.value = true
+  try {
+    await http.post(`/admin/applications/${draft.item.id}/role-correction`, {
+      revision: draft.item.revision, participantRole: draft.participantRole,
+      subjects: draft.subjects.map(value => value.trim()), reason: draft.reason.trim(),
+    })
+    success.value = `报名身份已更正为${labelOf(draft.participantRole)}。`
+    if (selectedPeriod.value?.status === 'MATCHING' && draft.item.selectionStatus === 'MATCHING_POOL') {
+      success.value += '请重新试算，再复核发布。'
+    }
+    await load()
+  } catch (e) {
+    roleError.value = apiErrorMessage(e)
+  } finally {
+    submitting.value = false
+  }
+}
+
 async function select(item: ParticipationApplication, selectionStatus: SelectionStatus) {
   if (!permissions.value.canSelect || submitting.value) return
   const scrollTop = window.scrollY
@@ -264,6 +302,7 @@ onMounted(() => refresh())
             <td>
               <div class="table-actions selection-actions">
                 <button class="button small" :class="isReviewable(item) && permissions.canReview ? 'primary' : 'ghost'" :disabled="submitting" @click="openReview(item)">{{ isReviewable(item) && permissions.canReview ? '人工审核' : '查看报名' }}</button>
+                <button v-if="item.roleChangeAllowed" class="button small secondary" :disabled="submitting" @click="openRoleCorrection(item)">改报名身份</button>
                 <template v-if="item.applicationStatus === 'APPROVED'">
                 <button v-if="item.selectionStatus === 'MATCHING_POOL'" class="button small danger" :disabled="submitting || !permissions.canSelect" :title="permissions.canSelect ? '撤出后本期匹配不会使用该报名' : permissions.notice" @click="withdraw(item)">撤出匹配池</button>
                 <button v-else class="button small secondary" :disabled="submitting || !permissions.canSelect" :title="permissions.canSelect ? '' : permissions.notice" @click="select(item, 'MATCHING_POOL')">入匹配池</button>
@@ -322,6 +361,35 @@ onMounted(() => refresh())
             <button v-if="isReviewable(target)" class="button primary" :disabled="submitting || conflict">确认审核</button>
           </template>
         </template>
+      </footer>
+    </form>
+  </dialog>
+  <dialog v-if="roleEdit" open class="modal review-modal" aria-label="更正报名身份">
+    <form @submit.prevent="saveRoleCorrection">
+      <header><h2>更正 {{ roleEdit.item.realName }} 的报名身份</h2></header>
+      <div class="modal-body">
+        <p class="muted correction-note">{{ roleEdit.item.studentNo }} · 当前为{{ labelOf(roleEdit.item.participantRole) }} · 报名绩点 {{ roleEdit.item.cumulativeGpa.toFixed(2) }}</p>
+        <label>更正后的报名身份
+          <select v-model="roleEdit.participantRole" :disabled="submitting">
+            <option value="CLIMBER">学业攀登者</option><option value="NAVIGATOR">学业领航者</option>
+          </select>
+        </label>
+        <template v-if="roleEdit.participantRole !== roleEdit.item.participantRole">
+          <p class="muted correction-note">原科目（{{ roleEdit.item.participantRole === 'CLIMBER' ? '需要帮扶' : '可以提供帮扶' }}） · {{ roleEdit.item.subjects.join('、') }}</p>
+          <div><button type="button" class="button small ghost" :disabled="submitting || roleSplitPending || !roleEdit.item.subjects.length"
+            @click="roleEdit.subjects = [...roleEdit.item.subjects]">确认原科目适用于新身份</button></div>
+          <SubjectEditor v-model="roleEdit.subjects" v-model:split-pending="roleSplitPending" :show-errors="showRoleSubjectErrors"
+            :title="roleEdit.participantRole === 'NAVIGATOR' ? '新身份可提供帮扶的课程' : '新身份需要帮扶的课程'" />
+          <label>身份更正原因<textarea v-model.trim="roleEdit.reason" maxlength="500" required :disabled="submitting" /></label>
+          <p v-if="roleEdit.item.selectionStatus === 'MATCHING_POOL'" class="notice warning">
+            更正后请重新核对该生的匹配依据。<template v-if="selectedPeriod?.status === 'MATCHING'">已有草稿需要重新试算。</template>
+          </p>
+        </template>
+        <p v-if="roleError" class="notice danger" role="alert">{{ roleError }}</p>
+      </div>
+      <footer>
+        <button type="button" class="button ghost" :disabled="submitting" @click="roleEdit = undefined">取消</button>
+        <button class="button primary" :disabled="submitting || roleSplitPending || roleEdit.participantRole === roleEdit.item.participantRole">保存身份更正</button>
       </footer>
     </form>
   </dialog>

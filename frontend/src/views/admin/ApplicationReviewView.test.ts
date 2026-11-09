@@ -46,3 +46,31 @@ it('keeps the period totals independent of the list status and refreshes them wh
   expect(wrapper.get('[data-testid="summary-total"]').text()).toBe('0')
   expect(http.get).toHaveBeenLastCalledWith('/admin/applications', { params: { periodId: 2 } })
 })
+
+it('allows changing an approved student’s role before publication and requires courses for the new role', async () => {
+  vi.mocked(http.post).mockReset().mockResolvedValue({})
+  vi.mocked(http.get).mockImplementation(async url => ({ data: { data: url === '/periods'
+    ? [{ id: 1, name: '本期', shortName: '本期', status: 'MATCHING' }]
+    : [{ id: 11, realName: '测试学生', studentNo: 'TEST11', grade: 2025, participantRole: 'CLIMBER',
+      cumulativeGpa: 4.3, subjects: ['高等数学'], applicationStatus: 'APPROVED', selectionStatus: 'MATCHING_POOL',
+      revision: 5, roleChangeAllowed: true }],
+  } }))
+  const wrapper = mount(ApplicationReviewView)
+  await flushPromises()
+  await wrapper.get('select[aria-label="审核状态"]').setValue('APPROVED')
+  await wrapper.findAll('button').find(button => button.text() === '改报名身份')!.trigger('click')
+  const dialog = wrapper.get('dialog[aria-label="更正报名身份"]')
+  await dialog.get('select').setValue('NAVIGATOR')
+  expect(dialog.text()).toContain('新身份可提供帮扶的课程')
+  await dialog.get('textarea').setValue('核验领航资格')
+  await dialog.get('form').trigger('submit')
+  expect(vi.mocked(http.post)).not.toHaveBeenCalled()
+  await dialog.findAll('button').find(button => button.text() === '确认原科目适用于新身份')!.trigger('click')
+  await dialog.get('form').trigger('submit')
+  await flushPromises()
+  expect(http.post).toHaveBeenLastCalledWith('/admin/applications/11/role-correction', {
+    revision: 5, participantRole: 'NAVIGATOR', subjects: ['高等数学'], reason: '核验领航资格',
+  })
+  expect(wrapper.text()).toContain('请重新试算')
+  wrapper.unmount()
+})

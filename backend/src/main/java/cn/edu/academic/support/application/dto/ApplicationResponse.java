@@ -9,5 +9,6 @@ public record ApplicationResponse(
         String major, Integer grade, String participantRole, BigDecimal cumulativeGpa, List<String> subjects,
         String statementText, List<String> learningStyles, List<String> personalities,
         String applicationStatus, String selectionStatus, String rejectionReason,
-        LocalDateTime submittedAt, LocalDateTime reviewedAt, Integer revision, Integer currentProfileVersion
+        LocalDateTime submittedAt, LocalDateTime reviewedAt, Integer revision, Integer currentProfileVersion,
+        Boolean roleChangeAllowed
 ) {}

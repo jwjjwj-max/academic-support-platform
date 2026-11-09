@@ -83,7 +83,7 @@ onMounted(load)
       <form v-else class="form-grid" @submit.prevent="submit">
         <div v-if="resubmitting" class="notice warning full-row">请按驳回原因核对报名内容，再提交管理员审核。</div>
         <label>活动期次<select v-model.number="form.periodId" required @change="fillForm"><option v-for="item in applicationFormPeriods" :key="item.id" :value="item.id">{{ item.name }}</option></select></label>
-        <label>本期身份<select v-model="form.participantRole" required><option value="CLIMBER">学业攀登者</option><option value="NAVIGATOR">学业领航者</option></select><small>同一期次提交后不能更换身份</small></label>
+        <label>本期身份<select v-model="form.participantRole" :disabled="resubmitting" required><option value="CLIMBER">学业攀登者</option><option value="NAVIGATOR">学业领航者</option></select><small>报名提交后如需调整身份，请联系管理员</small></label>
         <label>报名累计平均绩点<input v-model.number="form.cumulativeGpa" type="number" min="0" max="5" step="0.01" required /><small>截至报名时全部已修课程累计平均绩点，不是单学期绩点</small></label>
         <SubjectEditor :key="editorKey" v-model="form.subjects" v-model:split-pending="splitPending" class="full-row" :show-errors="subjectValidation" :title="form.participantRole === 'NAVIGATOR' ? '能够提供帮扶的课程' : '需要帮扶的课程'" />
         <fieldset class="choice-group full-row"><legend>学习风格（可多选，最多 3 项）</legend><label v-for="item in styles" :key="item"><input v-model="form.learningStyles" type="checkbox" :value="item" :disabled="!form.learningStyles.includes(item) && form.learningStyles.length >= 3" />{{ item }}</label></fieldset>

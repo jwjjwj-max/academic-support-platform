@@ -3,6 +3,7 @@ package cn.edu.academic.support;
 import cn.edu.academic.support.application.dto.ApplicationCorrectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationResponse;
 import cn.edu.academic.support.application.dto.ApplicationReviewRequest;
+import cn.edu.academic.support.application.dto.ApplicationRoleCorrectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationSelectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationSubmitRequest;
 import cn.edu.academic.support.application.mapper.ApplicationProfileSnapshotMapper;
@@ -368,6 +369,48 @@ class WeekTwoIntegrationTest {
         matchingService.publish(admin, localAlternative.roundId(), request());
         assertBusinessError(() -> matchingService.rematch(admin, period.getId(), request()), "NO_PENDING_REJECTION");
         assertThat(candidateMapper.selectById(rejectedCandidate.id()).getStatus()).isEqualTo("REJECTED");
+    }
+
+    @Test
+    void administratorRoleCorrectionChangesSupplyAndInvalidatesTheDraftBeforePublication() {
+        AuthenticatedUser admin = actor(createUser("role-admin", "ADMIN", "身份更正管理员"));
+        ActivityPeriod period = createPeriod(admin.id(), "MATCHING", "身份更正测试");
+        long periodId = period.getId();
+        var higher = createParticipant(periodId, "role-high", "高绩点学生", "CLIMBER", 2025, new BigDecimal("4.30"), "高等数学", "fixture");
+        var lower = createParticipant(periodId, "role-low", "待帮扶学生", "CLIMBER", 2025, new BigDecimal("2.10"), "线性代数", "fixture");
+        workspace.savePolicy(admin, periodId, 0, MatchingPolicy.defaults(2026), request());
+        evidence(admin, period, higher, List.of(), "高等数学");
+        evidence(admin, period, lower, List.of(), "大学英语");
+        int originalVersion = workspace.view(periodId).settings().revision();
+        var initial = matchingService.preview(admin, periodId, originalVersion, null, null, request());
+        assertThat(initial.candidates()).isEmpty();
+        assertThat(applicationService.listForAdmin(periodId, null)).allMatch(item -> Boolean.TRUE.equals(item.roleChangeAllowed()));
+
+        var change = new ApplicationRoleCorrectionRequest(0, "NAVIGATOR", List.of("线性代数"), "核对领航资格和科目");
+        var updated = applicationService.correctRole(admin, higher.getId(), change, request());
+        assertThat(updated.participantRole()).isEqualTo("NAVIGATOR");
+        assertThat(updated.subjects()).containsExactly("线性代数");
+        assertThat(updated.cumulativeGpa()).isEqualByComparingTo("4.30");
+        assertThat(updated.selectionStatus()).isEqualTo("MATCHING_POOL");
+        assertThat(updated.applicationStatus()).isEqualTo("APPROVED");
+        assertBusinessError(() -> applicationService.correctRole(admin, higher.getId(), change, request()), "APPLICATION_VERSION_CONFLICT");
+        var refreshed = workspace.view(periodId);
+        assertThat(refreshed.students()).anyMatch(item -> item.id() == higher.getId() && item.evidence() == null)
+                .anyMatch(item -> item.id() == lower.getId() && item.evidence() != null);
+        assertBusinessError(() -> matchingService.publish(admin, initial.round().id(), 0, request()), "MATCHING_VERSION_CONFLICT");
+        var regenerated = matchingService.preview(admin, periodId, refreshed.settings().revision(), initial.round().id(), 0, request());
+        assertThat(regenerated.candidates()).singleElement().satisfies(pair -> {
+            assertThat(pair.navigatorApplicationId()).isEqualTo(higher.getId());
+            assertThat(pair.climberApplicationId()).isEqualTo(lower.getId());
+            assertThat(pair.matchedSubjects()).containsExactly("线性代数");
+        });
+        matchingService.publish(admin, regenerated.round().id(), 0, request());
+        assertThat(applicationService.listForAdmin(periodId, null)).noneMatch(item -> Boolean.TRUE.equals(item.roleChangeAllowed()));
+        assertBusinessError(() -> applicationService.correctRole(admin, higher.getId(),
+                new ApplicationRoleCorrectionRequest(1, "CLIMBER", List.of("线性代数"), "旧页面提交"), request()),
+                "APPLICATION_ROLE_CORRECTION_CLOSED");
+        assertThat(jdbc.queryForObject("SELECT reason FROM operation_log WHERE action='APPLICATION_ROLE_CORRECTION' AND target_id=?",
+                String.class, higher.getId().toString())).isEqualTo("核对领航资格和科目");
     }
 
     @Test
