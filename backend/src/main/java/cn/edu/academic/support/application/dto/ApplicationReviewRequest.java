@@ -6,5 +6,10 @@ import jakarta.validation.constraints.Size;
 
 public record ApplicationReviewRequest(
         @NotBlank @Pattern(regexp = "APPROVED|REJECTED") String decision,
-        @Size(max = 500) String reason
-) {}
+        @Size(max = 500) String reason,
+        Integer revision
+) {
+    public ApplicationReviewRequest(String decision, String reason) {
+        this(decision, reason, null);
+    }
+}

@@ -25,6 +25,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Locale;
 
 @Service
 @RequiredArgsConstructor
@@ -72,7 +73,7 @@ public class StudentService {
     @Transactional
     public StudentProfileResponse updateMine(AuthenticatedUser actor, StudentProfileUpdateRequest request,
                                              HttpServletRequest servletRequest) {
-        StudentProfile profile = requiredProfile(actor.id());
+        StudentProfile profile = requiredProfile(actor.id(), true);
         StudentProfileResponse before = StudentProfileResponse.from(profile);
         String studentNo = request.studentNo().trim();
         ensureStudentNoAvailable(studentNo, actor.id());
@@ -102,17 +103,20 @@ public class StudentService {
         return StudentProfileResponse.from(profile);
     }
 
-    public Page<StudentProfile> listForReview(String status, long page, long size) {
+    public Page<StudentProfile> listForReview(String status, String keyword, long page, long size) {
+        String search = keyword == null ? "" : keyword.strip().toLowerCase(Locale.ROOT);
+        String pattern = "%" + search.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%";
         return studentProfileMapper.selectPage(Page.of(Math.max(1, page), Math.max(1, Math.min(size, 100))),
                 Wrappers.<StudentProfile>lambdaQuery()
                         .eq(status != null && !status.isBlank(), StudentProfile::getReviewStatus, status)
+                        .apply(!search.isEmpty(), "(LOWER(real_name) LIKE {0} ESCAPE '!' OR LOWER(student_no) LIKE {0} ESCAPE '!')", pattern)
                         .orderByAsc(StudentProfile::getSubmittedAt).orderByAsc(StudentProfile::getUserId));
     }
 
     @Transactional
     public StudentProfileResponse review(AuthenticatedUser actor, Long studentUserId, ProfileReviewRequest request,
                                          HttpServletRequest servletRequest) {
-        StudentProfile profile = requiredProfile(studentUserId);
+        StudentProfile profile = requiredProfile(studentUserId, true);
         StudentProfileResponse before = StudentProfileResponse.from(profile);
         profile.setReviewStatus(request.decision());
         profile.setRejectionReason("REJECTED".equals(request.decision()) ? request.reason().trim() : null);
@@ -127,7 +131,11 @@ public class StudentService {
     }
 
     private StudentProfile requiredProfile(Long userId) {
-        StudentProfile profile = studentProfileMapper.selectById(userId);
+        return requiredProfile(userId, false);
+    }
+
+    private StudentProfile requiredProfile(Long userId, boolean lock) {
+        StudentProfile profile = lock ? studentProfileMapper.lockById(userId) : studentProfileMapper.selectById(userId);
         if (profile == null) throw new BusinessException("STUDENT_NOT_FOUND", "学生不存在", HttpStatus.NOT_FOUND);
         return profile;
     }

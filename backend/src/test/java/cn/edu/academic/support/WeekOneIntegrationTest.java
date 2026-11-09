@@ -1,5 +1,6 @@
 package cn.edu.academic.support;
 
+import cn.edu.academic.support.audit.service.AuditService;
 import cn.edu.academic.support.user.mapper.UserAccountMapper;
 import cn.edu.academic.support.user.model.UserAccount;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
@@ -11,11 +12,15 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.doThrow;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -29,6 +34,8 @@ class WeekOneIntegrationTest {
     @Autowired ObjectMapper objectMapper;
     @Autowired UserAccountMapper userAccountMapper;
     @Autowired PasswordEncoder passwordEncoder;
+    @Autowired JdbcTemplate jdbc;
+    @MockitoSpyBean AuditService auditService;
 
     @BeforeEach
     void seedPrivilegedAccounts() {
@@ -131,6 +138,109 @@ class WeekOneIntegrationTest {
         assertThat(second.path("records").size()).isGreaterThan(0);
         java.util.Set<Long> ids=new java.util.HashSet<>();first.path("records").forEach(row->ids.add(row.path("userId").asLong()));
         second.path("records").forEach(row->assertThat(ids).doesNotContain(row.path("userId").asLong()));
+        mvc.perform(get("/admin/students").param("status", "PENDING").param("keyword", " PAGINGSTUDENT20 ")
+                        .header("Authorization", bearer(token)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.total").value(1))
+                .andExpect(jsonPath("$.data.records[0].studentNo").value("pagingstudent20"));
+        mvc.perform(get("/admin/students").param("status", "APPROVED").param("keyword", "分页测试")
+                        .header("Authorization", bearer(token)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.total").value(0));
+        mvc.perform(get("/admin/students").param("keyword", "%_").header("Authorization", bearer(token)))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.total").value(0));
+    }
+
+    @Test
+    void correctsApplicationWithAuditAndRollsBackACombinedApprovalOnAuditFailure() throws Exception {
+        String admin = bearer(login("admin01", "AdminPass2026"));
+        register("correction2026", "报名更正测试");
+        String student = bearer(login("correction2026", "Student2026"));
+        Long studentId = jdbc.queryForObject("SELECT id FROM sys_user WHERE login_name = 'correction2026'", Long.class);
+        mvc.perform(post("/admin/students/{id}/review", studentId).header("Authorization", admin)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"decision\":\"APPROVED\"}"))
+                .andExpect(status().isOk());
+        String createdPeriod = mvc.perform(post("/periods").header("Authorization", admin)
+                        .contentType(MediaType.APPLICATION_JSON).content(periodJson(40).replace("2026秋-40", "更正测试")
+                                .replace("秋期 40", "秋期更正测试")))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        long period = objectMapper.readTree(createdPeriod).path("data").path("id").asLong();
+        jdbc.update("""
+                UPDATE activity_period SET status = 'REGISTRATION', registration_start = ?, registration_end = ? WHERE id = ?
+                """, java.time.LocalDateTime.now().minusHours(1), java.time.LocalDateTime.now().plusHours(1), period);
+        var application = objectMapper.createObjectNode().put("periodId", period).put("participantRole", "CLIMBER")
+                .put("cumulativeGpa", 3.4).put("statementText", "这是一段用于测试报名审核的自述，描述需要补习高数与英语的具体学习目标和目前基础。");
+        application.putArray("learningStyles").add("例题驱动");
+        application.putArray("personalities").add("细致");
+        for (String invalid : java.util.List.of("[\"高数，英语\"]", "[\"高数\",\" 高数 \"]", "[\"　\"]",
+                "[\"" + "A".repeat(81) + "\"]", "[\"1\",\"2\",\"3\",\"4\",\"5\",\"6\",\"7\",\"8\",\"9\"]")) {
+            application.set("subjects", objectMapper.readTree(invalid));
+            mvc.perform(post("/applications").header("Authorization", student).contentType(MediaType.APPLICATION_JSON)
+                            .content(application.toString()))
+                    .andExpect(status().isBadRequest());
+        }
+        application.putArray("subjects").add("English Listening").add("高等数学");
+        String created = mvc.perform(post("/applications").header("Authorization", student)
+                        .contentType(MediaType.APPLICATION_JSON).content(application.toString()))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        long id = objectMapper.readTree(created).path("data").path("id").asLong();
+        jdbc.update("UPDATE activity_period SET status = 'REVIEW' WHERE id = ?", period);
+        String url = "/admin/applications/" + id + "/correction";
+        var correction = objectMapper.createObjectNode().put("revision", 0).put("currentProfileVersion", 1)
+                .put("grade", 2025).put("major", "人工智能").put("cumulativeGpa", 0).put("reason", "已与学生核对");
+        correction.putArray("subjects").add("线性代数");
+        mvc.perform(post(url).contentType(MediaType.APPLICATION_JSON).content(correction.toString()))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(post(url).header("Authorization", student).contentType(MediaType.APPLICATION_JSON).content(correction.toString()))
+                .andExpect(status().isForbidden());
+        mvc.perform(post(url).header("Authorization", admin).contentType(MediaType.APPLICATION_JSON).content(correction.toString()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.revision").value(1))
+                .andExpect(jsonPath("$.data.applicationStatus").value("SUBMITTED"))
+                .andExpect(jsonPath("$.data.selectionStatus").value("UNDECIDED"));
+        mvc.perform(post(url).header("Authorization", admin).contentType(MediaType.APPLICATION_JSON).content(correction.toString()))
+                .andExpect(status().isConflict());
+        mvc.perform(get("/applications/mine").header("Authorization", student))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data[0].grade").value(2025))
+                .andExpect(jsonPath("$.data[0].major").value("人工智能"))
+                .andExpect(jsonPath("$.data[0].cumulativeGpa").value(0))
+                .andExpect(jsonPath("$.data[0].subjects[0]").value("线性代数"));
+        mvc.perform(get("/students/me/profile").header("Authorization", student))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.grade").value(2025))
+                .andExpect(jsonPath("$.data.major").value("人工智能"))
+                .andExpect(jsonPath("$.data.profileVersion").value(2))
+                .andExpect(jsonPath("$.data.reviewStatus").value("APPROVED"));
+        mvc.perform(get("/admin/audit-logs").param("action", "APPLICATION_CORRECTION").header("Authorization", admin))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data[0].actorLogin").value("admin01"))
+                .andExpect(jsonPath("$.data[0].reason").value("已与学生核对"));
+        var log = jdbc.queryForObject("""
+                SELECT actor_login, reason, before_snapshot, after_snapshot FROM operation_log
+                WHERE action = 'APPLICATION_CORRECTION' AND target_id = ?
+                """, (row, index) -> java.util.List.of(row.getString("before_snapshot"), row.getString("after_snapshot")),
+                Long.toString(id));
+        assertThat(objectMapper.readTree(log.get(0)).path("grade").asInt()).isEqualTo(2023);
+        assertThat(objectMapper.readTree(log.get(1)).path("grade").asInt()).isEqualTo(2025);
+
+        correction.remove("subjects");
+        correction.put("approve", true).put("revision", 1).put("grade", 2026);
+        mvc.perform(post(url).header("Authorization", admin).contentType(MediaType.APPLICATION_JSON).content(correction.toString()))
+                .andExpect(status().isConflict());
+        correction.put("currentProfileVersion", 2);
+        doThrow(new IllegalStateException("audit failure")).when(auditService).log(
+                any(), eq("APPLICATION_CORRECTION"), eq("APPLICATION"), eq(id), any(), any(), any(), any());
+        mvc.perform(post(url).header("Authorization", admin).contentType(MediaType.APPLICATION_JSON).content(correction.toString()))
+                .andExpect(status().isInternalServerError());
+        assertThat(jdbc.queryForObject("SELECT grade FROM student_profile WHERE user_id = ?", Integer.class, studentId)).isEqualTo(2025);
+        assertThat(jdbc.queryForObject("SELECT grade FROM application_profile_snapshot WHERE application_id = ?", Integer.class, id)).isEqualTo(2025);
+        assertThat(jdbc.queryForObject("SELECT revision FROM application WHERE id = ?", Integer.class, id)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT application_status FROM application WHERE id = ?", String.class, id)).isEqualTo("SUBMITTED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM application_review_history WHERE application_id = ? AND action = 'APPROVE'", Long.class, id)).isZero();
+        org.mockito.Mockito.reset(auditService);
+        mvc.perform(post(url).header("Authorization", admin).contentType(MediaType.APPLICATION_JSON).content(correction.toString()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data.grade").value(2026))
+                .andExpect(jsonPath("$.data.applicationStatus").value("APPROVED"))
+                .andExpect(jsonPath("$.data.selectionStatus").value("UNDECIDED"));
+        jdbc.update("UPDATE activity_period SET status = 'MATCHING' WHERE id = ?", period);
+        correction.put("revision", 2).put("currentProfileVersion", 3).put("approve", false);
+        mvc.perform(post(url).header("Authorization", admin).contentType(MediaType.APPLICATION_JSON).content(correction.toString()))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("APPLICATION_CORRECTION_NOT_OPEN"));
     }
 
     private void register(String studentNo, String name) throws Exception {

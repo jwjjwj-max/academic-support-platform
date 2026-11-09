@@ -77,6 +77,8 @@ export type SelectionStatus = 'UNDECIDED' | 'MATCHING_POOL' | 'WAITLIST' | 'NOT_
 
 export interface ParticipationApplication {
   id: number
+  revision: number
+  currentProfileVersion?: number | null
   periodId: number
   periodName: string
   studentUserId: number
@@ -142,7 +144,17 @@ export interface SupportPairDetail {
 }
 export interface NotificationItem { id: number; periodId?: number; title: string; content: string; audienceLabel: string; createdAt: string; readAt?: string; createdByName: string }
 export interface TodoItem { type: string; title: string; description: string; targetId?: number; route: string; count: number }
-export interface AuditLog { id: number; actorLogin: string; action: string; targetType: string; targetId?: string; reason?: string; createdAt: string }
+export interface AuditLog {
+  id: number
+  actorLogin: string
+  action: string
+  targetType: string
+  targetId?: string
+  reason?: string
+  createdAt: string
+  beforeSnapshot?: string
+  afterSnapshot?: string
+}
 export interface GradeBatch { id:number;periodId:number;periodName:string;stage:'BEFORE'|'AFTER';label:string;originalFilename:string;status:string;totalRows:number;participantRows:number;errorRows:number;fieldMapping:Record<string,string>;createdAt:string;completedAt?:string }
 export interface GradePreview { batch:GradeBatch;headers:string[];suggestedMapping:Record<string,string>;samples:Record<string,string>[];validationMessages:string[];expectedParticipants:number }
 export interface AdminGrade { id:number;periodId:number;periodName:string;studentUserId:number;studentNo:string;name:string;role:ParticipantRole;stage:'BEFORE'|'AFTER';termGpa:number;termGpaRank?:number;professionalStudentCount?:number;professionalTopPercent?:number;college?:string;grade?:string;major?:string;className?:string;importBatchId:number;updatedAt:string }

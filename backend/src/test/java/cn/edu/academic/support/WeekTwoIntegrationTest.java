@@ -1,5 +1,6 @@
 package cn.edu.academic.support;
 
+import cn.edu.academic.support.application.dto.ApplicationCorrectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationResponse;
 import cn.edu.academic.support.application.dto.ApplicationReviewRequest;
 import cn.edu.academic.support.application.dto.ApplicationSelectionRequest;
@@ -178,6 +179,10 @@ class WeekTwoIntegrationTest {
                 new ApplicationReviewRequest("REJECTED", "报名自述需要补充具体帮扶目标"), request());
         assertThat(rejected.applicationStatus()).isEqualTo("REJECTED");
 
+        var correction = new ApplicationCorrectionRequest(rejected.revision(), 1, 2025, "人工智能",
+                null, null, null, "与学生核对年级专业", false);
+        assertThat(applicationService.correct(admin, application.getId(), correction, request()).applicationStatus())
+                .isEqualTo("REJECTED");
         AuthenticatedUser student = actor(userMapper.selectById(application.getStudentUserId()));
         ApplicationResponse resubmitted = applicationService.submit(student,
                 submission(period.getId(), "CLIMBER", "3.05"), request());
@@ -185,6 +190,8 @@ class WeekTwoIntegrationTest {
         assertThat(resubmitted.applicationStatus()).isEqualTo("SUBMITTED");
         assertThat(resubmitted.selectionStatus()).isEqualTo("UNDECIDED");
         assertThat(resubmitted.rejectionReason()).isNull();
+        assertThat(resubmitted.grade()).isEqualTo(2025);
+        assertThat(resubmitted.major()).isEqualTo("人工智能");
     }
 
     @Test

@@ -64,7 +64,7 @@ public class PeriodService {
     @Transactional
     public ActivityPeriod update(AuthenticatedUser actor, Long periodId, PeriodRequest request,
                                  HttpServletRequest servletRequest) {
-        ActivityPeriod period = required(periodId);
+        ActivityPeriod period = requiredForUpdate(periodId);
         if ("ARCHIVED".equals(period.getStatus())) throw new BusinessException("PERIOD_ARCHIVED", "已归档期次不可编辑");
         if (!period.getStatus().equals(request.status())) {
             throw new BusinessException("PERIOD_STATUS_REQUIRES_REASON", "期次阶段请通过阶段变更操作修改并填写原因");
@@ -84,7 +84,7 @@ public class PeriodService {
     public ActivityPeriod extendAcceptanceWindow(AuthenticatedUser actor, Long periodId,
                                                  AcceptanceWindowExtensionRequest request,
                                                  HttpServletRequest servletRequest) {
-        ActivityPeriod period = required(periodId);
+        ActivityPeriod period = requiredForUpdate(periodId);
         if (!"ACCEPTANCE".equals(period.getStatus()))
             throw new BusinessException("ACCEPTANCE_EXTENSION_NOT_OPEN", "仅验收阶段可以延长学生材料提交窗口");
         if (!request.newAcceptanceEnd().isAfter(period.getAcceptanceEnd()))
@@ -103,7 +103,7 @@ public class PeriodService {
     @Transactional
     public ActivityPeriod changeStatus(AuthenticatedUser actor, Long periodId, PeriodStatusRequest request,
                                        HttpServletRequest servletRequest) {
-        ActivityPeriod period = required(periodId);
+        ActivityPeriod period = requiredForUpdate(periodId);
         if (period.getStatus().equals(request.status())) return period;
         int oldIndex = STATUS_ORDER.indexOf(period.getStatus());
         int newIndex = STATUS_ORDER.indexOf(request.status());
@@ -218,6 +218,12 @@ public class PeriodService {
                 .eq(MatchCandidate::getStatus, "PUBLISHED")
                 .and(query -> query.eq(MatchCandidate::getNavigatorDecision, "PENDING")
                         .or().eq(MatchCandidate::getClimberDecision, "PENDING")));
+    }
+
+    private ActivityPeriod requiredForUpdate(Long id) {
+        ActivityPeriod period = periodMapper.lockById(id);
+        if (period == null) throw new BusinessException("PERIOD_NOT_FOUND", "期次不存在", HttpStatus.NOT_FOUND);
+        return period;
     }
 
     private ActivityPeriod required(Long id) {

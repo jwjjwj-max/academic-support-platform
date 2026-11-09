@@ -1,5 +1,6 @@
 package cn.edu.academic.support.application.service;
 
+import cn.edu.academic.support.application.dto.ApplicationCorrectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationResponse;
 import cn.edu.academic.support.application.dto.ApplicationReviewRequest;
 import cn.edu.academic.support.application.dto.ApplicationSelectionRequest;
@@ -25,15 +26,27 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.RoundingMode;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
 public class ApplicationService {
+    private static final List<String> REVIEWABLE = List.of("SUBMITTED", "UNDER_REVIEW");
+    private static final List<String> CORRECTABLE = List.of("SUBMITTED", "UNDER_REVIEW", "APPROVED", "REJECTED");
+    private static final Pattern SUBJECT_SEPARATOR = Pattern.compile("[、,，;；\\r\\n]");
+    private static final Pattern EDGE_WHITESPACE = Pattern.compile("^[\\s\\uFEFF]+|[\\s\\uFEFF]+$", Pattern.UNICODE_CHARACTER_CLASS);
     private final ParticipationApplicationMapper applicationMapper;
     private final ApplicationProfileSnapshotMapper snapshotMapper;
     private final ApplicationReviewHistoryMapper historyMapper;
@@ -49,19 +62,23 @@ public class ApplicationService {
                 .stream().map(this::response).toList();
     }
 
+    @Transactional(readOnly = true)
     public List<ApplicationResponse> listForAdmin(Long periodId, String status) {
         return applicationMapper.selectList(Wrappers.<ParticipationApplication>lambdaQuery()
                         .eq(periodId != null, ParticipationApplication::getPeriodId, periodId)
                         .eq(status != null && !status.isBlank(), ParticipationApplication::getApplicationStatus, status)
                         .orderByAsc(ParticipationApplication::getSubmittedAt).orderByAsc(ParticipationApplication::getId))
-                .stream().map(this::response).toList();
+                .stream().map(application -> {
+                    StudentProfile profile = profileMapper.selectById(application.getStudentUserId());
+                    return response(application, profile == null ? null : profile.getProfileVersion());
+                }).toList();
     }
 
     @Transactional
     public ApplicationResponse submit(AuthenticatedUser actor, ApplicationSubmitRequest request,
                                       HttpServletRequest servletRequest) {
+        ActivityPeriod period = lockPeriod(request.periodId());
         StudentProfile profile = requiredApprovedProfile(actor.id());
-        ActivityPeriod period = requiredPeriod(request.periodId());
         ParticipationApplication existing = applicationMapper.selectOne(Wrappers.<ParticipationApplication>lambdaQuery()
                 .eq(ParticipationApplication::getPeriodId, request.periodId())
                 .eq(ParticipationApplication::getStudentUserId, actor.id()));
@@ -83,13 +100,14 @@ public class ApplicationService {
             throw new BusinessException("RESUBMISSION_NOT_OPEN", "仅报名审核阶段允许被驳回学生修改重提");
         }
 
+        ApplicationResponse before = resubmit ? response(existing) : null;
         ParticipationApplication application = resubmit ? existing : new ParticipationApplication();
         application.setPeriodId(request.periodId());
         application.setStudentUserId(actor.id());
         application.setParticipantRole(request.participantRole());
         application.setCumulativeGpa(request.cumulativeGpa());
-        application.setSubjectsJson(json(normalize(request.subjects())));
-        application.setStatementText(request.statementText().trim());
+        application.setSubjectsJson(json(validateSubjects(request.subjects())));
+        application.setStatementText(validateStatement(request.statementText()));
         application.setLearningStylesJson(json(normalize(request.learningStyles())));
         application.setPersonalitiesJson(json(normalize(request.personalities())));
         application.setApplicationStatus("SUBMITTED");
@@ -98,61 +116,146 @@ public class ApplicationService {
         application.setSubmittedAt(LocalDateTime.now());
         application.setReviewedBy(null);
         application.setReviewedAt(null);
-        if (resubmit) applicationMapper.updateById(application); else applicationMapper.insert(application);
+        if (resubmit) saveRevision(application);
+        else {
+            application.setRevision(0);
+            applicationMapper.insert(application);
+        }
 
         if (!resubmit) createSnapshot(application, profile);
         addHistory(application.getId(), resubmit ? "RESUBMIT" : "SUBMIT", null, actor.id());
         auditService.log(actor, resubmit ? "APPLICATION_RESUBMIT" : "APPLICATION_SUBMIT", "APPLICATION",
-                application.getId(), resubmit ? existing : null, response(application), null, servletRequest);
+                application.getId(), before, response(application), null, servletRequest);
         return response(application);
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public ApplicationResponse review(AuthenticatedUser actor, Long id, ApplicationReviewRequest request,
                                       HttpServletRequest servletRequest) {
-        ParticipationApplication application = required(id);
-        ActivityPeriod period = requiredPeriod(application.getPeriodId());
-        if (!"REVIEW".equals(period.getStatus())) {
-            throw new BusinessException("APPLICATION_REVIEW_NOT_OPEN", "仅报名审核阶段可以审核报名");
-        }
-        if (!List.of("SUBMITTED", "UNDER_REVIEW").contains(application.getApplicationStatus())) {
-            throw new BusinessException("APPLICATION_NOT_REVIEWABLE", "当前报名状态不能审核");
-        }
+        ParticipationApplication application = lockReviewApplication(id, "APPLICATION_REVIEW_NOT_OPEN", "审核报名");
+        if (request.revision() != null) requireRevision(application.getRevision(), request.revision());
+        requireReviewable(application);
         if ("REJECTED".equals(request.decision()) && (request.reason() == null || request.reason().isBlank())) {
             throw new BusinessException("REJECTION_REASON_REQUIRED", "驳回报名必须填写原因");
         }
         ApplicationResponse before = response(application);
-        application.setApplicationStatus(request.decision());
-        application.setRejectionReason("REJECTED".equals(request.decision()) ? request.reason().trim() : null);
-        application.setReviewedBy(actor.id());
-        application.setReviewedAt(LocalDateTime.now());
-        applicationMapper.updateById(application);
-        addHistory(id, request.decision().equals("APPROVED") ? "APPROVE" : "REJECT",
-                application.getRejectionReason(), actor.id());
+        applyReview(application, actor, request.decision(), request.reason());
+        saveRevision(application);
         auditService.log(actor, "APPLICATION_REVIEW", "APPLICATION", id, before, response(application),
                 application.getRejectionReason(), servletRequest);
         return response(application);
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public ApplicationResponse correct(AuthenticatedUser actor, Long id, ApplicationCorrectionRequest request,
+                                       HttpServletRequest servletRequest) {
+        ParticipationApplication application = lockReviewApplication(id, "APPLICATION_CORRECTION_NOT_OPEN", "更正报名");
+        requireRevision(application.getRevision(), request.revision());
+        if (!CORRECTABLE.contains(application.getApplicationStatus())) {
+            throw new BusinessException("APPLICATION_NOT_CORRECTABLE", "当前报名状态不能更正");
+        }
+        if (request.approve()) requireReviewable(application);
+
+        ApplicationProfileSnapshot snapshot = snapshot(id);
+        if (snapshot == null) throw new BusinessException("APPLICATION_SNAPSHOT_MISSING", "报名资料快照不存在");
+        Map<String, Object> before = correctionState(application, snapshot);
+        Map<String, Object> afterProfile = Map.of();
+        if (request.grade() != null || request.major() != null) {
+            StudentProfile profile = profileMapper.lockById(application.getStudentUserId());
+            if (profile == null) throw new BusinessException("STUDENT_NOT_FOUND", "学生资料不存在", HttpStatus.NOT_FOUND);
+            requireRevision(profile.getProfileVersion(), request.currentProfileVersion());
+            before.put("studentProfile", profileFields(profile));
+            if (request.grade() != null) {
+                snapshot.setGrade(request.grade());
+                profile.setGrade(request.grade());
+            }
+            if (request.major() != null) {
+                snapshot.setMajor(request.major());
+                profile.setMajor(request.major());
+            }
+            if (!before.get("studentProfile").equals(profileFields(profile))) {
+                profile.setProfileVersion(profile.getProfileVersion() + 1);
+                profileMapper.updateById(profile);
+            }
+            snapshot.setProfileVersion(profile.getProfileVersion());
+            snapshotMapper.updateById(snapshot);
+            afterProfile = profileFields(profile);
+        }
+        if (request.cumulativeGpa() != null) {
+            application.setCumulativeGpa(request.cumulativeGpa().setScale(2, RoundingMode.HALF_UP));
+        }
+        if (request.subjects() != null) application.setSubjectsJson(json(validateSubjects(request.subjects())));
+        if (request.statementText() != null) application.setStatementText(validateStatement(request.statementText()));
+        Map<String, Object> after = correctionState(application, snapshot);
+        if (!afterProfile.isEmpty()) after.put("studentProfile", afterProfile);
+        if (before.equals(after)) throw new BusinessException("APPLICATION_CORRECTION_EMPTY", "请修改至少一项报名资料");
+        if (request.approve()) {
+            applyReview(application, actor, "APPROVED", null);
+            after.put("applicationStatus", application.getApplicationStatus());
+        }
+        saveRevision(application);
+        auditService.log(actor, "APPLICATION_CORRECTION", "APPLICATION", id, before, after,
+                request.reason().strip(), servletRequest);
+        StudentProfile currentProfile = profileMapper.selectById(application.getStudentUserId());
+        return response(application, currentProfile == null ? null : currentProfile.getProfileVersion());
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public ApplicationResponse select(AuthenticatedUser actor, Long id, ApplicationSelectionRequest request,
                                       HttpServletRequest servletRequest) {
-        ParticipationApplication application = required(id);
-        ActivityPeriod period = requiredPeriod(application.getPeriodId());
-        if (!"REVIEW".equals(period.getStatus())) {
-            throw new BusinessException("APPLICATION_SELECTION_NOT_OPEN", "仅报名审核阶段可以设置入选状态");
-        }
+        ParticipationApplication application = lockReviewApplication(id, "APPLICATION_SELECTION_NOT_OPEN", "设置入选状态");
         if (!"APPROVED".equals(application.getApplicationStatus())) {
             throw new BusinessException("APPLICATION_NOT_APPROVED", "只有审核通过的报名可以设置入选状态");
         }
         String before = application.getSelectionStatus();
         application.setSelectionStatus(request.selectionStatus());
-        applicationMapper.updateById(application);
+        saveRevision(application);
         addHistory(id, request.selectionStatus(), null, actor.id());
         auditService.log(actor, "APPLICATION_SELECTION", "APPLICATION", id,
                 java.util.Map.of("selectionStatus", before),
                 java.util.Map.of("selectionStatus", request.selectionStatus()), null, servletRequest);
         return response(application);
+    }
+
+    private void applyReview(ParticipationApplication application, AuthenticatedUser actor, String decision, String reason) {
+        application.setApplicationStatus(decision);
+        application.setRejectionReason("REJECTED".equals(decision) ? reason.trim() : null);
+        application.setReviewedBy(actor.id());
+        application.setReviewedAt(LocalDateTime.now());
+        addHistory(application.getId(), "APPROVED".equals(decision) ? "APPROVE" : "REJECT",
+                application.getRejectionReason(), actor.id());
+    }
+
+    private void requireReviewable(ParticipationApplication application) {
+        if (!REVIEWABLE.contains(application.getApplicationStatus())) {
+            throw new BusinessException("APPLICATION_NOT_REVIEWABLE", "当前报名状态不能审核");
+        }
+    }
+
+    private void requireRevision(Integer current, Integer expected) {
+        if (!Objects.equals(current, expected)) {
+            throw new BusinessException("APPLICATION_VERSION_CONFLICT", "报名或学生资料已更新，请重新加载后再操作", HttpStatus.CONFLICT);
+        }
+    }
+
+    private void saveRevision(ParticipationApplication application) {
+        application.setRevision(application.getRevision() + 1);
+        applicationMapper.updateById(application);
+    }
+
+    private Map<String, Object> correctionState(ParticipationApplication application, ApplicationProfileSnapshot snapshot) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("grade", snapshot.getGrade());
+        values.put("major", snapshot.getMajor());
+        values.put("cumulativeGpa", application.getCumulativeGpa().stripTrailingZeros());
+        values.put("subjects", list(application.getSubjectsJson()));
+        values.put("statementText", application.getStatementText());
+        values.put("applicationStatus", application.getApplicationStatus());
+        return values;
+    }
+
+    private Map<String, Object> profileFields(StudentProfile profile) {
+        return Map.of("grade", profile.getGrade(), "major", profile.getMajor(), "profileVersion", profile.getProfileVersion());
     }
 
     private void createSnapshot(ParticipationApplication application, StudentProfile profile) {
@@ -180,29 +283,41 @@ public class ApplicationService {
     }
 
     private StudentProfile requiredApprovedProfile(Long userId) {
-        StudentProfile profile = profileMapper.selectById(userId);
+        StudentProfile profile = profileMapper.lockById(userId);
         if (profile == null || !"APPROVED".equals(profile.getReviewStatus())) {
             throw new BusinessException("PROFILE_NOT_APPROVED", "个人资料审核通过后才能报名", HttpStatus.FORBIDDEN);
         }
         return profile;
     }
 
-    private ActivityPeriod requiredPeriod(Long id) {
-        ActivityPeriod period = periodMapper.selectById(id);
+    private ActivityPeriod lockPeriod(Long id) {
+        ActivityPeriod period = periodMapper.lockById(id);
         if (period == null) throw new BusinessException("PERIOD_NOT_FOUND", "期次不存在", HttpStatus.NOT_FOUND);
         return period;
     }
 
-    private ParticipationApplication required(Long id) {
-        ParticipationApplication application = applicationMapper.selectById(id);
+    private ParticipationApplication lockReviewApplication(Long id, String code, String action) {
+        ParticipationApplication application = applicationMapper.selectOne(Wrappers.<ParticipationApplication>lambdaQuery()
+                .select(ParticipationApplication::getPeriodId).eq(ParticipationApplication::getId, id));
         if (application == null) throw new BusinessException("APPLICATION_NOT_FOUND", "报名记录不存在", HttpStatus.NOT_FOUND);
-        return application;
+        if (!"REVIEW".equals(lockPeriod(application.getPeriodId()).getStatus())) {
+            throw new BusinessException(code, "仅报名审核阶段可以" + action);
+        }
+        return applicationMapper.selectById(id);
     }
 
     private ApplicationResponse response(ParticipationApplication application) {
+        return response(application, null);
+    }
+
+    private ApplicationProfileSnapshot snapshot(Long applicationId) {
+        return snapshotMapper.selectOne(Wrappers.<ApplicationProfileSnapshot>lambdaQuery()
+                .eq(ApplicationProfileSnapshot::getApplicationId, applicationId));
+    }
+
+    private ApplicationResponse response(ParticipationApplication application, Integer currentProfileVersion) {
         ActivityPeriod period = periodMapper.selectById(application.getPeriodId());
-        ApplicationProfileSnapshot snapshot = snapshotMapper.selectOne(Wrappers.<ApplicationProfileSnapshot>lambdaQuery()
-                .eq(ApplicationProfileSnapshot::getApplicationId, application.getId()));
+        ApplicationProfileSnapshot snapshot = snapshot(application.getId());
         return new ApplicationResponse(application.getId(), application.getPeriodId(), period == null ? "—" : period.getName(),
                 application.getStudentUserId(), snapshot == null ? "—" : snapshot.getStudentNo(),
                 snapshot == null ? "—" : snapshot.getRealName(), snapshot == null ? "—" : snapshot.getMajor(),
@@ -210,7 +325,35 @@ public class ApplicationService {
                 application.getCumulativeGpa(), list(application.getSubjectsJson()), application.getStatementText(),
                 list(application.getLearningStylesJson()), list(application.getPersonalitiesJson()),
                 application.getApplicationStatus(), application.getSelectionStatus(), application.getRejectionReason(),
-                application.getSubmittedAt(), application.getReviewedAt());
+                application.getSubmittedAt(), application.getReviewedAt(), application.getRevision(), currentProfileVersion);
+    }
+
+    private List<String> validateSubjects(List<String> subjects) {
+        List<String> validated = new ArrayList<>();
+        var seen = new LinkedHashSet<String>();
+        for (int i = 0; i < subjects.size(); i++) {
+            String raw = subjects.get(i);
+            String subject = raw == null ? "" : EDGE_WHITESPACE.matcher(raw).replaceAll("");
+            String prefix = "第 " + (i + 1) + " 门课程";
+            if (subject.isEmpty()) throw new BusinessException("INVALID_SUBJECTS", prefix + "不能为空");
+            if (SUBJECT_SEPARATOR.matcher(raw).find()) {
+                throw new BusinessException("INVALID_SUBJECTS", prefix + "含分隔符，请逐科填写，每行只填一门");
+            }
+            if (subject.length() > 80) throw new BusinessException("INVALID_SUBJECTS", prefix + "不能超过 80 字");
+            if (!seen.add(subject.toLowerCase(Locale.ROOT))) {
+                throw new BusinessException("INVALID_SUBJECTS", prefix + "与前面填写的课程重复");
+            }
+            validated.add(subject);
+        }
+        return validated;
+    }
+
+    private String validateStatement(String raw) {
+        String statement = EDGE_WHITESPACE.matcher(raw).replaceAll("");
+        if (statement.length() < 30 || statement.length() > 500) {
+            throw new BusinessException("INVALID_APPLICATION_STATEMENT", "报名自述须为 30 至 500 字");
+        }
+        return statement;
     }
 
     private List<String> normalize(List<String> input) {

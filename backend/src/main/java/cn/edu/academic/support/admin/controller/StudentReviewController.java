@@ -32,9 +32,10 @@ public class StudentReviewController {
 
     @GetMapping
     public ApiResponse<Page<StudentProfile>> list(@RequestParam(required = false) String status,
+                                                  @RequestParam(required = false) String keyword,
                                                   @RequestParam(defaultValue = "1") long page,
                                                   @RequestParam(defaultValue = "20") long size) {
-        return ApiResponse.success(studentService.listForReview(status, page, size));
+        return ApiResponse.success(studentService.listForReview(status, keyword, page, size));
     }
 
     @PostMapping("/{studentUserId}/review")

@@ -1,5 +1,6 @@
 package cn.edu.academic.support.application.controller;
 
+import cn.edu.academic.support.application.dto.ApplicationCorrectionRequest;
 import cn.edu.academic.support.application.dto.ApplicationResponse;
 import cn.edu.academic.support.application.dto.ApplicationReviewRequest;
 import cn.edu.academic.support.application.dto.ApplicationSelectionRequest;
@@ -49,6 +50,15 @@ public class ApplicationController {
                                                    @Valid @RequestBody ApplicationReviewRequest request,
                                                    HttpServletRequest servletRequest) {
         return ApiResponse.success(service.review(actor, id, request, servletRequest));
+    }
+
+    @PostMapping("/admin/applications/{id}/correction")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ApiResponse<ApplicationResponse> correct(@AuthenticationPrincipal AuthenticatedUser actor,
+                                                     @PathVariable Long id,
+                                                     @Valid @RequestBody ApplicationCorrectionRequest request,
+                                                     HttpServletRequest servletRequest) {
+        return ApiResponse.success(service.correct(actor, id, request, servletRequest));
     }
 
     @PostMapping("/admin/applications/{id}/selection")

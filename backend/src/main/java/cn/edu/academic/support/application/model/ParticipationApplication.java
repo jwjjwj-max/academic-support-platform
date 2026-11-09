@@ -1,6 +1,8 @@
 package cn.edu.academic.support.application.model;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
@@ -23,9 +25,13 @@ public class ParticipationApplication {
     private String personalitiesJson;
     private String applicationStatus;
     private String selectionStatus;
+    private Integer revision;
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String rejectionReason;
     private LocalDateTime submittedAt;
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private Long reviewedBy;
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private LocalDateTime reviewedAt;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;

@@ -15,7 +15,7 @@ public record ApplicationSubmitRequest(
         @NotNull Long periodId,
         @NotBlank @Pattern(regexp = "CLIMBER|NAVIGATOR", message = "请选择攀登者或领航者身份") String participantRole,
         @NotNull @DecimalMin("0.00") @DecimalMax("5.00") BigDecimal cumulativeGpa,
-        @NotEmpty @Size(max = 8) List<@NotBlank @Size(max = 80) String> subjects,
+        @NotEmpty(message = "请至少填写一门课程") @Size(max = 8, message = "最多填写 8 门课程") List<String> subjects,
         @NotBlank @Size(min = 30, max = 500) String statementText,
         @NotEmpty @Size(max = 3) List<@NotBlank @Size(max = 40) String> learningStyles,
         @NotEmpty @Size(max = 3) List<@NotBlank @Size(max = 40) String> personalities
