@@ -59,7 +59,7 @@ public class MatchingService {
                                Integer draftRevision, LocalDateTime createdAt, LocalDateTime publishedAt) {}
     public record AdjustmentLog(String administrator, String reason, LocalDateTime time,
                                 List<Long> before, List<Long> after) {}
-    public record RoundParticipant(long id, String name, String studentNo) {}
+    public record RoundParticipant(long id, String name, String studentNo, int grade) {}
     public record RoundView(RoundSummary round, MatchingPolicy policy, List<Long> participantIds,
                             List<MatchCandidateResponse> candidates, List<AdjustmentLog> adjustments,
                             List<RoundParticipant> participants) {}
@@ -308,7 +308,8 @@ public class MatchingService {
         }
         List<RoundParticipant> participants = ids.isEmpty() ? List.of() : snapshotMapper.selectList(
                 Wrappers.<ApplicationProfileSnapshot>lambdaQuery().in(ApplicationProfileSnapshot::getApplicationId, ids)).stream()
-                .map(profile -> new RoundParticipant(profile.getApplicationId(), profile.getRealName(), profile.getStudentNo())).toList();
+                .map(profile -> new RoundParticipant(profile.getApplicationId(), profile.getRealName(), profile.getStudentNo(),
+                        profile.getGrade())).toList();
         return new RoundView(summary(round), snapshot.policy(), snapshot.participantIds(), candidates, adjustments, participants);
     }
 

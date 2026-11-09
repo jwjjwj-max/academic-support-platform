@@ -46,12 +46,15 @@ it('opens on the waiting table and reads names and numbers from the round when s
   const historical = {
     ...view,
     candidates: [pair(1, 1, 2, 'PUBLISHED')],
-    participants: students,
+    participants: students.map(student => ({ ...student, grade: student.id === 3 ? 2025 : 2026 })),
   }
   const wrapper = mount(MatchingRoundPanel, { props: { view: historical, students: [], historical: true, editable: false, busy: false } })
   const table = wrapper.get('table[aria-label="待安排名单"]')
   expect(table.findAll('tbody tr').map(row => row.findAll('td').map(cell => cell.text()))).toEqual([
     ['学生3', 'TEST3', '该轮未安排'], ['学生4', 'TEST4', '该轮未安排'],
+  ])
+  expect(wrapper.findAll('.waiting-chart-row').map(row => [row.get('span').text(), row.get('strong').text()])).toEqual([
+    ['大一', '1 人'], ['大二', '1 人'], ['大三', '0 人'],
   ])
   await wrapper.get('button[aria-pressed="false"]').trigger('click')
   const pairTable = wrapper.get('table[aria-label="方案组合名单"]')

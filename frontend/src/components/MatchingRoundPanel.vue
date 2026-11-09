@@ -25,6 +25,19 @@ const identities = computed(() => new Map([
 ].map(student => [student.id, student])))
 const occupied = computed(() => new Set(selected.value.flatMap(members)))
 const waiting = computed(() => props.view.participantIds.filter(id => !occupied.value.has(id)))
+const waitingByYear = computed(() => {
+  const freshmanGrade = props.view.policy?.freshmanGrade
+  const counts = new Map<number, number>()
+  for (const id of waiting.value) {
+    const grade = identities.value.get(id)?.grade ?? people.value.get(id)?.grade
+    if (grade != null) counts.set(grade, (counts.get(grade) ?? 0) + 1)
+  }
+  const rows = ['大一', '大二', '大三'].map((label, offset) => ({
+    label, count: freshmanGrade == null ? 0 : (counts.get(freshmanGrade - offset) ?? 0),
+  }))
+  const maximum = Math.max(1, ...rows.map(row => row.count))
+  return { rows, maximum, other: waiting.value.length - rows.reduce((total, row) => total + row.count, 0) }
+})
 const resultTabs = computed(() => ([
   { id: 'waiting', text: `待安排（${waiting.value.length} 人）`, visible: !!props.view.policy },
   { id: 'selected', text: `方案组合（${selected.value.length} 组）`, visible: true },
@@ -170,6 +183,15 @@ function pendingReason(id: number) {
         </table></div>
       </template>
       <template v-else-if="filter === 'waiting'">
+        <figure class="waiting-chart">
+          <figcaption>各年级待安排人数</figcaption>
+          <div v-for="row in waitingByYear.rows" :key="row.label" class="waiting-chart-row">
+            <span>{{ row.label }}</span>
+            <div class="waiting-chart-track" aria-hidden="true"><div :style="{ width: `${row.count / waitingByYear.maximum * 100}%` }" /></div>
+            <strong>{{ row.count }} 人</strong>
+          </div>
+          <small v-if="waitingByYear.other" class="muted">其他或年级不详 · {{ waitingByYear.other }} 人</small>
+        </figure>
         <p v-if="!waiting.length" class="muted">本轮可安排的报名均已覆盖。</p>
         <div v-else class="table-wrap"><table class="match-table" aria-label="待安排名单">
           <thead><tr><th scope="col">姓名</th><th scope="col">学号</th><th scope="col">未匹配原因</th><th v-if="editable" scope="col">操作</th></tr></thead>
@@ -232,6 +254,12 @@ function pendingReason(id: number) {
 .round-panel { display:grid; gap:10px; }
 .round-summary { display:flex; flex-wrap:wrap; gap:4px 20px; font-size:13px; color:var(--muted); }
 .round-actions { flex-wrap:wrap; }
+.waiting-chart { display:grid; gap:6px; width:min(100%, 420px); margin:0 0 4px; }
+.waiting-chart figcaption { font-size:14px; font-weight:650; }
+.waiting-chart-row { display:grid; grid-template-columns:2.5em minmax(0, 1fr) 4em; align-items:center; gap:8px; font-size:13px; }
+.waiting-chart-row strong { text-align:right; font-variant-numeric:tabular-nums; }
+.waiting-chart-track { height:8px; overflow:hidden; border-radius:4px; background:#edf0f4; }
+.waiting-chart-track > div { height:100%; border-radius:inherit; background:var(--primary); }
 .match-table th,.match-table td { padding:9px 10px; }
 .match-table th,.match-table .identity,.match-table button { white-space:nowrap; }
 .match-table .student-number { font-variant-numeric:tabular-nums; }
