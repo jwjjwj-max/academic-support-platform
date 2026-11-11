@@ -458,9 +458,11 @@ class WeekTwoIntegrationTest {
                 new BigDecimal("3.00"), "线性代数", "fixture");
         var original = createParticipant(periodId, "manual-original", "原搭档", "CLIMBER", 2025,
                 new BigDecimal("2.00"), "线性代数", "fixture");
-        var learner = createParticipant(periodId, "manual-learner", "待安排学生", "CLIMBER", 2025,
+        var learner = createParticipant(periodId, "manual-learner", "待安排学生", "CLIMBER", 2024,
                 new BigDecimal("4.00"), "英语听说", "fixture");
-        var excluded = createParticipant(periodId, "manual-excluded", "禁止组合成员", "CLIMBER", 2025,
+        var eligibleExceptGrade = createParticipant(periodId, "manual-junior", "待安排大三学生", "CLIMBER", 2024,
+                new BigDecimal("2.00"), "线性代数", "fixture");
+        var excluded = createParticipant(periodId, "manual-excluded", "禁止组合成员", "CLIMBER", 2024,
                 new BigDecimal("4.00"), "英语听说", "fixture");
         workspace.savePolicy(admin, periodId, 0, MatchingPolicy.defaults(2026), request());
         workspace.setExclusion(admin, periodId, navigator.getId(), excluded.getId(), true, "核实已有私下约组", request());
@@ -472,14 +474,20 @@ class WeekTwoIntegrationTest {
             assertThat(pair.status()).isEqualTo("SELECTED");
         });
         assertThat(matchingService.manualOptions(roundId, 0, navigator.getId()))
-                .extracting(MatchingService.ManualOption::climberApplicationId).containsExactlyInAnyOrder(original.getId(), learner.getId());
+                .extracting(MatchingService.ManualOption::climberApplicationId)
+                .containsExactlyInAnyOrder(original.getId(), learner.getId(), eligibleExceptGrade.getId());
+        assertThat(matchingService.manualOptions(roundId, 0, eligibleExceptGrade.getId())).singleElement().satisfies(option -> {
+            assertThat(option.navigatorApplicationId()).isEqualTo(navigator.getId());
+            assertThat(option.exceptions()).containsExactly("大二领航者带大三攀登者");
+        });
         assertBusinessError(() -> matchingService.adjust(admin, roundId, 0, null, null, navigator.getId(), excluded.getId(),
                 "尝试禁止组合", request()), "MATCHING_MANUAL_PAIR_UNAVAILABLE");
 
         var assigned = matchingService.adjust(admin, roundId, 0, null, null, learner.getId(), navigator.getId(), "已核实线下辅导计划", request());
         var selected = assigned.candidates().stream().filter(pair -> "SELECTED".equals(pair.status())).findFirst().orElseThrow();
         assertThat(selected.climberApplicationId()).isEqualTo(learner.getId());
-        assertThat(selected.coverage()).containsEntry("exceptions", List.of("领航者绩点未高于攀登者", "课程覆盖未达到本期规则要求"));
+        assertThat(selected.coverage()).containsEntry("exceptions",
+                List.of("大二领航者带大三攀登者", "领航者绩点未高于攀登者", "课程覆盖未达到本期规则要求"));
         assertThat(assigned.adjustments()).singleElement().satisfies(log -> {
             assertThat(log.reason()).isEqualTo("已核实线下辅导计划");
             assertThat(log.before()).containsExactly(draft.candidates().getFirst().id());

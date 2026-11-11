@@ -84,7 +84,9 @@ final class MatchingPlanner {
     }
 
     private static Candidate evaluate(Rule rule, int order, int freshman, Participant a, Participant b, boolean manual) {
-        if (!eligible(rule, freshman, a, b)) return null;
+        boolean sophomoreMentorsJunior = manual && rule.kind() == Kind.REGULAR && a.navigator() && !b.navigator()
+                && a.grade == freshman - 1 && b.grade == freshman - 2;
+        if (!sophomoreMentorsJunior && !eligible(rule, freshman, a, b)) return null;
         boolean gpaMet = !rule.requireHigherGpa()
                 || a.application.getCumulativeGpa().compareTo(b.application.getCumulativeGpa()) > 0;
         if (!manual && !gpaMet) return null;
@@ -96,6 +98,7 @@ final class MatchingPlanner {
         if (!manual && !coverageMet) return null;
 
         List<String> exceptions = new ArrayList<>();
+        if (sophomoreMentorsJunior) exceptions.add("大二领航者带大三攀登者");
         if (!gpaMet) exceptions.add("领航者绩点未高于攀登者");
         if (!coverageMet) exceptions.add("课程覆盖未达到本期规则要求");
         List<String> shared = peer && rule.minimumCoverage() == 0 ? sharedStudySubjects(a, b) : List.of();
