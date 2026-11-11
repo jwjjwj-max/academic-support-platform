@@ -138,6 +138,21 @@ export interface MatchCoverage {
   firstUncovered: string[]
   secondUncovered: string[]
   sharedStudySubjects?: string[]
+  exceptions?: string[]
+}
+export interface ManualMatchOption {
+  navigatorApplicationId: number
+  climberApplicationId: number
+  matchKind: Exclude<MatchKind, 'LEGACY'>
+  exceptions: string[]
+}
+export interface MatchingAdjustment {
+  revision: number
+  removeId?: number
+  selectId?: number
+  applicationId?: number
+  partnerId?: number
+  reason: string
 }
 export interface MatchingRule {
   kind: Exclude<MatchKind, 'LEGACY'>

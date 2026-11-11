@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { mount } from '@vue/test-utils'
-import { expect, it } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import { expect, it, vi } from 'vitest'
 import MatchingRoundPanel from './MatchingRoundPanel.vue'
+import { http } from '@/services/http'
 import type { MatchCandidate, MatchingRoundView, MatchingStudent } from '@/types/api'
 
 function pair(id: number, first: number, second: number, status: string): MatchCandidate {
@@ -60,4 +61,36 @@ it('opens on the waiting table and reads names and numbers from the round when s
   const pairTable = wrapper.get('table[aria-label="方案组合名单"]')
   expect(pairTable.text()).toContain('学生1（TEST1）')
   expect(pairTable.text()).toContain('学生2（TEST2）')
+})
+
+it('can specify a partner by student number when the waiting student has no rule candidates', async () => {
+  const get = vi.spyOn(http, 'get').mockResolvedValue({ data: { data: [
+    { navigatorApplicationId: 1, climberApplicationId: 3, matchKind: 'PEER', exceptions: ['课程覆盖未达到本期规则要求'] },
+    { navigatorApplicationId: 3, climberApplicationId: 4, matchKind: 'PEER', exceptions: [] },
+  ] } })
+  try {
+    const draft = { ...view, candidates: [pair(1, 1, 2, 'SELECTED')] }
+    const wrapper = mount(MatchingRoundPanel, { props: { view: draft, students, editable: true, busy: false } })
+    await wrapper.get('table[aria-label="待安排名单"] tbody tr button').trigger('click')
+    await flushPromises()
+    expect(get).toHaveBeenCalledWith('/admin/matching/rounds/10/manual-options', expect.objectContaining({
+      params: { applicationId: 3, revision: 3 },
+    }))
+    const dialog = wrapper.get('dialog')
+    await dialog.get('input[type="search"]').setValue('TEST1')
+    expect(dialog.findAll('select option').map(option => option.text())).toEqual([
+      '请选择搭档', '学生1（TEST1） · 大一结对学习 · 需例外',
+    ])
+    await dialog.get('select').setValue('1')
+    expect(dialog.text()).toContain('人工例外 · 课程覆盖未达到本期规则要求')
+    expect(dialog.text()).toContain('回到待安排 · 学生2（TEST2）')
+    expect(dialog.get('button.primary').attributes('disabled')).toBeDefined()
+    await dialog.get('textarea').setValue('已核实共学计划')
+    await dialog.get('form').trigger('submit')
+    expect(wrapper.emitted('adjust')).toEqual([[{
+      revision: 3, removeId: undefined, applicationId: 3, partnerId: 1, reason: '已核实共学计划',
+    }]])
+  } finally {
+    get.mockRestore()
+  }
 })

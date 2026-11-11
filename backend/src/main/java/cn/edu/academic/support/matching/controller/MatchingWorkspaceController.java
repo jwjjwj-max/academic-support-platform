@@ -38,6 +38,7 @@ public class MatchingWorkspaceController {
                                    boolean excluded, @NotBlank @Size(max = 500) String reason) {}
     public record PreviewRequest(@NotNull @Min(0) Integer revision, Long replaceRoundId, @Min(0) Integer replaceRevision) {}
     public record AdjustmentRequest(@NotNull @Min(0) Integer revision, Long removeId, Long selectId,
+                                    @Min(1) Long applicationId, @Min(1) Long partnerId,
                                     @NotBlank @Size(max = 500) String reason) {}
     public record DiscardRequest(@Min(0) Integer revision, @NotBlank @Size(max = 500) String reason) {}
     public record KeyRequest(@NotBlank @Size(max = 256) String apiKey) {}
@@ -93,10 +94,17 @@ public class MatchingWorkspaceController {
         return ApiResponse.success(matching.preview(actor, periodId, body.revision(), body.replaceRoundId(), body.replaceRevision(), request));
     }
 
+    @GetMapping("/rounds/{roundId}/manual-options")
+    public ApiResponse<List<MatchingService.ManualOption>> manualOptions(@PathVariable Long roundId,
+            @RequestParam int revision, @RequestParam Long applicationId) {
+        return ApiResponse.success(matching.manualOptions(roundId, revision, applicationId));
+    }
+
     @PostMapping("/rounds/{roundId}/adjust")
     public ApiResponse<MatchingService.RoundView> adjust(@AuthenticationPrincipal AuthenticatedUser actor,
             @PathVariable Long roundId, @Valid @RequestBody AdjustmentRequest body, HttpServletRequest request) {
-        return ApiResponse.success(matching.adjust(actor, roundId, body.revision(), body.removeId(), body.selectId(), body.reason(), request));
+        return ApiResponse.success(matching.adjust(actor, roundId, body.revision(), body.removeId(), body.selectId(),
+                body.applicationId(), body.partnerId(), body.reason(), request));
     }
 
     @PostMapping("/rounds/{roundId}/discard")

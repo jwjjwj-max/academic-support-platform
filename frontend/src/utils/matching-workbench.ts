@@ -8,7 +8,10 @@ export function matchKindLabel(kind?: MatchKind) {
   return labels[kind ?? 'LEGACY']
 }
 
-export function members(pair: MatchCandidate) {
+type PairMembers = Pick<MatchCandidate, 'navigatorApplicationId' | 'climberApplicationId'>
+type PairAssignment = PairMembers & Pick<MatchCandidate, 'matchKind'>
+
+export function members(pair: PairMembers) {
   return [pair.navigatorApplicationId, pair.climberApplicationId]
 }
 
@@ -16,11 +19,11 @@ export function selectedPairs(view?: MatchingRoundView | null) {
   return view?.candidates.filter(pair => ['SELECTED', 'PUBLISHED', 'CONFIRMED', 'REJECTED'].includes(pair.status)) ?? []
 }
 
-export function adjustmentImpact(view: MatchingRoundView, removeId?: number, replacement?: MatchCandidate) {
+export function adjustmentImpact(view: MatchingRoundView, removeId?: number, replacement?: PairAssignment) {
   const before = selectedPairs(view)
   const conflicts = new Set(replacement ? members(replacement) : [])
   const removed = before.filter(pair => pair.id === removeId || members(pair).some(id => conflicts.has(id)))
-  const after = before.filter(pair => !removed.includes(pair))
+  const after: PairAssignment[] = before.filter(pair => !removed.includes(pair))
   if (replacement) after.push(replacement)
   const occupied = new Set(after.flatMap(members))
   const returned = [...new Set(removed.flatMap(members))].filter(id => !occupied.has(id))

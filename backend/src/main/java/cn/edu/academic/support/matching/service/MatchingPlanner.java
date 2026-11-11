@@ -36,7 +36,8 @@ final class MatchingPlanner {
     record Coverage(String course, String knowledgePoint, String offerQuote, String needQuote) {}
 
     record Basis(List<Coverage> firstToSecond, List<Coverage> secondToFirst,
-                 List<String> firstUncovered, List<String> secondUncovered, List<String> sharedStudySubjects) {}
+                 List<String> firstUncovered, List<String> secondUncovered, List<String> sharedStudySubjects,
+                 List<String> exceptions) {}
 
     record Candidate(Participant first, Participant second, Rule rule, int order, Basis basis, int quality) {
         List<String> subjects() {
@@ -61,25 +62,51 @@ final class MatchingPlanner {
             for (Participant a : people) {
                 for (Participant b : people) {
                     if (a == b || (!affected.isEmpty() && !affected.contains(a.id()) && !affected.contains(b.id()))
-                            || !eligible(rule, freshman, a, b) || exclusions.contains(Key.of(a.id(), b.id()))) continue;
-                    Direction forward = coverage(a, b);
-                    if (forward.covered.size() < rule.minimumCoverage()) continue;
-                    boolean peer = rule.kind() == Kind.PEER;
-                    Direction reverse = peer ? coverage(b, a) : new Direction(List.of(), List.of());
-                    if (peer && reverse.covered.size() < rule.minimumCoverage()) continue;
-                    List<String> shared = peer && rule.minimumCoverage() == 0 ? sharedStudySubjects(a, b) : List.of();
-                    int quality = peer ? 2 * Math.min(forward.ratio(), reverse.ratio()) + forward.ratio() + reverse.ratio()
-                            : forward.ratio() * 4;
-                    if (peer && rule.minimumCoverage() == 0) {
-                        int supportedDirections = (forward.covered.isEmpty() ? 0 : 1) + (reverse.covered.isEmpty() ? 0 : 1);
-                        quality = 1000 * supportedDirections + quality / 4 + Math.min(shared.size(), 8);
-                    }
-                    candidates.add(new Candidate(a, b, rule, order,
-                            new Basis(forward.covered, reverse.covered, reverse.uncovered, forward.uncovered, shared), quality));
+                            || exclusions.contains(Key.of(a.id(), b.id()))) continue;
+                    Candidate candidate = evaluate(rule, order, freshman, a, b, false);
+                    if (candidate != null) candidates.add(candidate);
                 }
             }
         }
         return new Plan(List.copyOf(candidates), select(candidates, people.size(), policy.rules().size()));
+    }
+
+    static Candidate manualCandidate(MatchingPolicy policy, Participant first, Participant second) {
+        int freshman = policy.freshmanGrade();
+        for (int order = 0; order < policy.rules().size(); order++) {
+            Rule rule = policy.rules().get(order);
+            if (!rule.enabled()) continue;
+            Candidate candidate = evaluate(rule, order, freshman, first, second, true);
+            if (candidate == null) candidate = evaluate(rule, order, freshman, second, first, true);
+            if (candidate != null) return candidate;
+        }
+        return null;
+    }
+
+    private static Candidate evaluate(Rule rule, int order, int freshman, Participant a, Participant b, boolean manual) {
+        if (!eligible(rule, freshman, a, b)) return null;
+        boolean gpaMet = !rule.requireHigherGpa()
+                || a.application.getCumulativeGpa().compareTo(b.application.getCumulativeGpa()) > 0;
+        if (!manual && !gpaMet) return null;
+        Direction forward = coverage(a, b);
+        boolean peer = rule.kind() == Kind.PEER;
+        Direction reverse = peer ? coverage(b, a) : new Direction(List.of(), List.of());
+        boolean coverageMet = forward.covered.size() >= rule.minimumCoverage()
+                && (!peer || reverse.covered.size() >= rule.minimumCoverage());
+        if (!manual && !coverageMet) return null;
+
+        List<String> exceptions = new ArrayList<>();
+        if (!gpaMet) exceptions.add("领航者绩点未高于攀登者");
+        if (!coverageMet) exceptions.add("课程覆盖未达到本期规则要求");
+        List<String> shared = peer && rule.minimumCoverage() == 0 ? sharedStudySubjects(a, b) : List.of();
+        int quality = peer ? 2 * Math.min(forward.ratio(), reverse.ratio()) + forward.ratio() + reverse.ratio()
+                : forward.ratio() * 4;
+        if (peer && rule.minimumCoverage() == 0) {
+            int supportedDirections = (forward.covered.isEmpty() ? 0 : 1) + (reverse.covered.isEmpty() ? 0 : 1);
+            quality = 1000 * supportedDirections + quality / 4 + Math.min(shared.size(), 8);
+        }
+        return new Candidate(a, b, rule, order,
+                new Basis(forward.covered, reverse.covered, reverse.uncovered, forward.uncovered, shared, List.copyOf(exceptions)), quality);
     }
 
     private static boolean eligible(Rule rule, int freshman, Participant a, Participant b) {
@@ -90,9 +117,7 @@ final class MatchingPlanner {
         if (rule.kind() == Kind.FRESHMAN_SUPPORT) {
             return b.grade == freshman && (a.grade == freshman - 1 || rule.allowOlderNavigator() && a.grade == freshman - 2);
         }
-        boolean eligibleGrade = b.grade < freshman && (a.grade == b.grade || rule.allowOlderNavigator() && a.grade < b.grade);
-        return eligibleGrade && (!rule.requireHigherGpa()
-                || a.application.getCumulativeGpa().compareTo(b.application.getCumulativeGpa()) > 0);
+        return b.grade < freshman && (a.grade == b.grade || rule.allowOlderNavigator() && a.grade < b.grade);
     }
 
     private static List<String> sharedStudySubjects(Participant first, Participant second) {

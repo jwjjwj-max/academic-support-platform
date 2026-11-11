@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import type { MatchCandidate, MatchingRoundView, MatchingStudent } from '@/types/api'
+import type { ApiResponse, ManualMatchOption, MatchCandidate, MatchingAdjustment, MatchingRoundView, MatchingStudent } from '@/types/api'
+import { apiErrorMessage, http } from '@/services/http'
 import { adjustmentImpact, matchKindLabel, members, selectedPairs } from '@/utils/matching-workbench'
 import { labelOf } from '@/utils/labels'
 
@@ -12,12 +13,20 @@ const props = defineProps<{
   editable: boolean
   busy: boolean
 }>()
-const emit = defineEmits<{ adjust: [data: { revision: number; removeId?: number; selectId?: number; reason: string }] }>()
+const emit = defineEmits<{ adjust: [data: MatchingAdjustment] }>()
 const filter = ref<'selected' | 'waiting' | 'diff'>('selected')
 const expandedPair = ref<number>()
 const editing = ref<{ pair?: MatchCandidate; student?: MatchingStudent }>()
 const choice = ref<number | 'dissolve' | ''>('')
 const reason = ref('')
+const manualMode = ref(false)
+const manualAnchor = ref<number>()
+const partnerId = ref<number | ''>('')
+const partnerQuery = ref('')
+const manualOptions = ref<ManualMatchOption[]>([])
+const manualLoading = ref(false)
+const manualError = ref('')
+const canSpecify = computed(() => props.editable && props.view.round.roundType === 'NORMAL')
 const selected = computed(() => selectedPairs(props.view))
 const people = computed(() => new Map(props.students.map(student => [student.id, student])))
 const identities = computed(() => new Map([
@@ -62,7 +71,17 @@ const options = computed(() => {
     .filter(pair => adjustmentImpact(props.view, editing.value?.pair?.id, pair).valid)
 })
 const replacement = computed(() => options.value.find(pair => pair.id === choice.value))
-const impact = computed(() => choice.value ? adjustmentImpact(props.view, editing.value?.pair?.id, replacement.value) : undefined)
+const manualPartner = computed(() => manualOptions.value.find(pair => otherMember(pair) === partnerId.value))
+const visiblePartners = computed(() => {
+  const query = partnerQuery.value.trim().toLowerCase()
+  return manualOptions.value.filter(pair => personIdentity(otherMember(pair)).toLowerCase().includes(query))
+})
+const impact = computed(() => {
+  const next = manualMode.value ? manualPartner.value : replacement.value
+  if (next || !manualMode.value && choice.value === 'dissolve') {
+    return adjustmentImpact(props.view, editing.value?.pair?.id, next)
+  }
+})
 const changes = computed(() => {
   if (!props.previous) return []
   const key = (pair: MatchCandidate) => `${pair.matchKind}:${members(pair).sort((a, b) => a - b).join('-')}`
@@ -74,6 +93,31 @@ const changes = computed(() => {
   ]
 })
 watch(() => [props.view.round.id, props.view.round.draftRevision, props.editable], () => { editing.value = undefined })
+watch(() => editing.value && manualMode.value ? manualAnchor.value : undefined, async (anchor, _previous, onCleanup) => {
+  manualOptions.value = []
+  partnerId.value = ''
+  partnerQuery.value = ''
+  manualError.value = ''
+  manualLoading.value = false
+  const revision = props.view.round.draftRevision
+  if (anchor == null || revision == null) return
+  const controller = new AbortController()
+  onCleanup(() => controller.abort())
+  manualLoading.value = true
+  try {
+    const response = await http.get<ApiResponse<ManualMatchOption[]>>(`/admin/matching/rounds/${props.view.round.id}/manual-options`, {
+      params: { applicationId: anchor, revision }, signal: controller.signal,
+    })
+    if (!controller.signal.aborted) {
+      const existingPartner = selected.value.find(pair => members(pair).includes(anchor))
+      manualOptions.value = response.data.data.filter(option => !existingPartner || !members(existingPartner).includes(otherMember(option)))
+    }
+  } catch (error) {
+    if (!controller.signal.aborted) manualError.value = apiErrorMessage(error)
+  } finally {
+    if (!controller.signal.aborted) manualLoading.value = false
+  }
+})
 watch(() => props.view.round.id, () => {
   filter.value = props.view.policy && waiting.value.length ? 'waiting' : 'selected'
   expandedPair.value = undefined
@@ -83,12 +127,27 @@ function open(pair?: MatchCandidate, student?: MatchingStudent) {
   editing.value = { pair, student }
   choice.value = ''
   reason.value = ''
+  manualMode.value = false
+  if (!pair && canSpecify.value && !options.value.length) specify()
+}
+
+function specify() {
+  manualAnchor.value = editing.value?.student?.id ?? editing.value?.pair?.navigatorApplicationId
+  manualMode.value = true
+}
+
+function otherMember(pair: ManualMatchOption) {
+  return pair.navigatorApplicationId === manualAnchor.value ? pair.climberApplicationId : pair.navigatorApplicationId
 }
 
 function save() {
-  if (!props.editable || props.view.round.draftRevision == null || !choice.value || !impact.value?.valid || !reason.value.trim()) return
-  emit('adjust', { revision: props.view.round.draftRevision, removeId: editing.value?.pair?.id,
-    selectId: replacement.value?.id, reason: reason.value.trim() })
+  if (!props.editable || props.view.round.draftRevision == null || !impact.value?.valid || !reason.value.trim()) return
+  const body = { revision: props.view.round.draftRevision, removeId: editing.value?.pair?.id, reason: reason.value.trim() }
+  if (manualMode.value && manualPartner.value) {
+    emit('adjust', { ...body, applicationId: manualAnchor.value, partnerId: otherMember(manualPartner.value) })
+  } else {
+    emit('adjust', { ...body, selectId: replacement.value?.id })
+  }
 }
 
 function personIdentity(id: number, fallback = `报名 #${id}`) {
@@ -144,7 +203,7 @@ function pendingReason(id: number) {
               <td class="identity">{{ personIdentity(pair.navigatorApplicationId, pair.navigatorName) }}</td>
               <td class="identity">{{ personIdentity(pair.climberApplicationId, pair.climberName) }}</td>
               <td>{{ matchKindLabel(pair.matchKind) }}
-                <small v-if="pair.manuallySelected">人工调整</small>
+                <small v-if="pair.manuallySelected">{{ pair.coverage?.exceptions?.length ? '人工例外' : '人工调整' }}</small>
                 <small v-if="view.round.status === 'PUBLISHED'">{{ labelOf(pair.status) }}</small>
               </td>
               <td>
@@ -160,6 +219,7 @@ function pendingReason(id: number) {
               </div></td>
             </tr>
             <tr v-if="expandedPair === pair.id" class="detail-row"><td colspan="5">
+            <p v-if="pair.coverage?.exceptions?.length" class="muted">人工例外 · {{ pair.coverage.exceptions.join('、') }}</p>
             <div v-if="pair.coverage" class="grid two basis">
               <div v-for="direction in [
                 { name: `${pair.navigatorName} → ${pair.climberName}`, items: pair.coverage.firstToSecond, uncovered: pair.coverage.secondUncovered },
@@ -199,7 +259,7 @@ function pendingReason(id: number) {
             <td class="identity"><strong>{{ identities.get(id)?.name ?? `报名 #${id}` }}</strong></td>
             <td class="identity student-number">{{ identities.get(id)?.studentNo ?? '—' }}</td>
             <td>{{ pendingReason(id) }}</td>
-            <td v-if="editable"><button v-if="people.get(id) && compatible.get(id)?.some(pair => adjustmentImpact(view, undefined, pair).valid)"
+            <td v-if="editable"><button v-if="people.get(id) && (canSpecify || compatible.get(id)?.some(pair => adjustmentImpact(view, undefined, pair).valid))"
               class="button secondary small" :disabled="busy" @click="open(undefined, people.get(id))">手动组队</button></td>
           </tr></tbody>
         </table></div>
@@ -232,20 +292,42 @@ function pendingReason(id: number) {
     <form @submit.prevent="save">
       <header><h2>{{ editing.pair ? `调整 ${pairIdentity(editing.pair)}` : `为 ${personIdentity(editing.student!.id)} 手动组队` }}</h2></header>
       <div class="modal-body">
-        <label>调整为<select v-model="choice" required :disabled="busy">
+        <label v-if="!manualMode">调整为<select v-model="choice" required :disabled="busy">
           <option value="" disabled>请选择调整方式</option>
           <option v-for="pair in options" :key="pair.id" :value="pair.id">{{ pairIdentity(pair) }} · {{ matchKindLabel(pair.matchKind) }}</option>
           <option v-if="editing.pair" value="dissolve">拆组，双方回到待安排</option>
         </select></label>
+        <div v-if="canSpecify" class="table-actions">
+          <button v-if="!manualMode" type="button" class="button secondary small" :disabled="busy" @click="specify">管理员指定搭档</button>
+          <button v-else type="button" class="button ghost small" :disabled="busy" @click="manualMode = false">返回规则候选</button>
+        </div>
+        <template v-if="manualMode">
+          <label v-if="editing.pair">保留哪位成员<select v-model="manualAnchor" :disabled="busy">
+            <option v-for="id in members(editing.pair)" :key="id" :value="id">{{ personIdentity(id) }}</option>
+          </select></label>
+          <label>搜索搭档<input v-model="partnerQuery" type="search" placeholder="输入姓名或学号" :disabled="busy || manualLoading" @input="partnerId = ''" /></label>
+          <label>指定搭档<select v-model="partnerId" required :disabled="busy || manualLoading || !visiblePartners.length">
+            <option value="" disabled>{{ manualLoading ? '正在加载搭档…' : visiblePartners.length ? '请选择搭档' : '没有符合搜索条件的可指定搭档' }}</option>
+            <option v-for="option in visiblePartners" :key="otherMember(option)" :value="otherMember(option)">
+              {{ personIdentity(otherMember(option)) }} · {{ matchKindLabel(option.matchKind) }}{{ option.exceptions.length ? ' · 需例外' : '' }}
+            </option>
+          </select></label>
+          <p v-if="manualError" class="text-danger" role="alert">{{ manualError }}</p>
+        </template>
         <div v-if="impact" class="notice warning" role="status">
-          <p v-if="replacement">组建 · {{ pairIdentity(replacement) }}<template v-if="replacement.matchedSubjects.length">（{{ replacement.matchedSubjects.join('、') }}）</template></p>
+          <template v-if="manualMode && manualPartner && manualAnchor != null">
+            <p>组建 · {{ personIdentity(manualAnchor) }} 与 {{ personIdentity(otherMember(manualPartner)) }}</p>
+            <p v-if="manualPartner.exceptions.length">人工例外 · {{ manualPartner.exceptions.join('、') }}</p>
+          </template>
+          <p v-if="!manualMode && replacement">组建 · {{ pairIdentity(replacement) }}<template v-if="replacement.matchedSubjects.length">（{{ replacement.matchedSubjects.join('、') }}）</template></p>
           <p v-if="impact.removed.length">解除 · {{ impact.removed.map(pairIdentity).join('；') }}</p>
           <p v-if="impact.returned.length">回到待安排 · {{ impact.returned.map(id => personIdentity(id)).join('、') }}</p>
+          <p v-if="!impact.valid">该调整会超过本期规则组数上限。</p>
         </div>
         <label>调整原因<textarea v-model.trim="reason" required maxlength="500" :disabled="busy" /></label>
       </div>
       <footer><button type="button" class="button ghost" :disabled="busy" @click="editing = undefined">取消</button>
-        <button class="button primary" :disabled="busy || !choice || !impact?.valid || !reason">保存人工调整</button></footer>
+        <button class="button primary" :disabled="busy || !impact?.valid || !reason">保存人工调整</button></footer>
     </form>
   </dialog>
 </template>

@@ -60,6 +60,8 @@ public class MatchingService {
     public record AdjustmentLog(String administrator, String reason, LocalDateTime time,
                                 List<Long> before, List<Long> after) {}
     public record RoundParticipant(long id, String name, String studentNo, int grade) {}
+    public record ManualOption(long navigatorApplicationId, long climberApplicationId, MatchingPolicy.Kind matchKind,
+                               List<String> exceptions) {}
     public record RoundView(RoundSummary round, MatchingPolicy policy, List<Long> participantIds,
                             List<MatchCandidateResponse> candidates, List<AdjustmentLog> adjustments,
                             List<RoundParticipant> participants) {}
@@ -229,15 +231,7 @@ public class MatchingService {
                                           HttpServletRequest request) {
         long periodId = period.getId();
         var people = workspace.participants(periodId, unavailableApplicationIds(periodId));
-        Set<MatchingPlanner.Key> blocked = workspace.blocked(periodId);
-        Map<Long, Long> applicationByUser = people.stream().collect(Collectors.toMap(
-                person -> person.application().getStudentUserId(), MatchingPlanner.Participant::id));
-        for (RejectedMatchPair pair : rejectedPairMapper.selectList(Wrappers.<RejectedMatchPair>lambdaQuery()
-                .eq(RejectedMatchPair::getPeriodId, periodId).eq(RejectedMatchPair::getActive, true))) {
-            Long first = applicationByUser.get(pair.getNavigatorUserId()), second = applicationByUser.get(pair.getClimberUserId());
-            if (first != null && second != null) blocked.add(MatchingPlanner.Key.of(first, second));
-        }
-        var plan = MatchingPlanner.plan(settings.policy(), people, blocked, affected);
+        var plan = MatchingPlanner.plan(settings.policy(), people, blockedPairs(periodId, people), affected);
         if (!affected.isEmpty() && plan.candidates().isEmpty()) {
             throw new BusinessException("NO_LOCAL_REMATCH_CANDIDATE", "没有满足当前规则的局部重匹配组合，请复核依据");
         }
@@ -258,25 +252,42 @@ public class MatchingService {
         round.setCreatedBy(actor.id());
         roundMapper.insert(round);
         for (var edge : plan.candidates()) {
-            MatchCandidate candidate = new MatchCandidate();
-            candidate.setRoundId(round.getId());
-            candidate.setNavigatorApplicationId(edge.first().id());
-            candidate.setClimberApplicationId(edge.second().id());
-            candidate.setMatchKind(edge.rule().kind().name());
-            candidate.setTotalScore(BigDecimal.ZERO);
-            candidate.setScoreDetail(json(edge.basis()));
-            candidate.setMatchedSubjects(json(edge.subjects()));
-            candidate.setManuallySelected(false);
+            MatchCandidate candidate = newCandidate(round, edge);
             boolean selected = plan.selected().contains(edge);
             candidate.setAdminConfirmed(selected);
             candidate.setStatus(selected ? "SELECTED" : "GENERATED");
-            candidate.setNavigatorDecision("PENDING");
-            candidate.setClimberDecision("PENDING");
             candidateMapper.insert(candidate);
         }
         auditService.log(actor, "MATCHING_WORKSPACE_PREVIEW", "MATCH_ROUND", round.getId(), null,
                 Map.of("periodId", periodId, "candidateCount", plan.candidates().size(), "selectedPairs", plan.selected().size()), null, request);
         return requiredRound(round.getId());
+    }
+
+    private MatchCandidate newCandidate(MatchRound round, MatchingPlanner.Candidate edge) {
+        MatchCandidate candidate = new MatchCandidate();
+        candidate.setRoundId(round.getId());
+        candidate.setNavigatorApplicationId(edge.first().id());
+        candidate.setClimberApplicationId(edge.second().id());
+        candidate.setMatchKind(edge.rule().kind().name());
+        candidate.setTotalScore(BigDecimal.ZERO);
+        candidate.setScoreDetail(json(edge.basis()));
+        candidate.setMatchedSubjects(json(edge.subjects()));
+        candidate.setManuallySelected(false);
+        candidate.setNavigatorDecision("PENDING");
+        candidate.setClimberDecision("PENDING");
+        return candidate;
+    }
+
+    private Set<MatchingPlanner.Key> blockedPairs(long periodId, List<MatchingPlanner.Participant> people) {
+        Set<MatchingPlanner.Key> blocked = workspace.blocked(periodId);
+        Map<Long, Long> applicationByUser = people.stream().collect(Collectors.toMap(
+                person -> person.application().getStudentUserId(), MatchingPlanner.Participant::id));
+        for (RejectedMatchPair pair : rejectedPairMapper.selectList(Wrappers.<RejectedMatchPair>lambdaQuery()
+                .eq(RejectedMatchPair::getPeriodId, periodId).eq(RejectedMatchPair::getActive, true))) {
+            Long first = applicationByUser.get(pair.getNavigatorUserId()), second = applicationByUser.get(pair.getClimberUserId());
+            if (first != null && second != null) blocked.add(MatchingPlanner.Key.of(first, second));
+        }
+        return blocked;
     }
 
     @Transactional(readOnly = true)
@@ -348,19 +359,51 @@ public class MatchingService {
         }).toList();
     }
 
+    @Transactional(readOnly = true)
+    public List<ManualOption> manualOptions(Long roundId, int revision, Long applicationId) {
+        MatchRound round = requiredRound(roundId);
+        requireEditable(round, requiredPeriod(round.getPeriodId()), revision);
+        return manualCandidates(round, applicationId).stream().map(candidate -> new ManualOption(candidate.first().id(),
+                candidate.second().id(), candidate.rule().kind(), candidate.basis().exceptions())).toList();
+    }
+
+    private List<MatchingPlanner.Candidate> manualCandidates(MatchRound round, Long applicationId) {
+        if (!"NORMAL".equals(round.getRoundType())) {
+            throw new BusinessException("MATCHING_MANUAL_DRAFT_REQUIRED", "管理员指定搭档仅适用于本期试算草稿");
+        }
+        RuleSnapshot snapshot = ruleSnapshot(round);
+        Set<Long> ids = new HashSet<>(snapshot.participantIds());
+        long periodId = round.getPeriodId();
+        var people = workspace.participants(periodId, unavailableApplicationIds(periodId)).stream()
+                .filter(person -> ids.contains(person.id())).toList();
+        var anchor = people.stream().filter(person -> applicationId.equals(person.id())).findFirst()
+                .orElseThrow(() -> new BusinessException("MATCHING_MANUAL_STUDENT_UNAVAILABLE", "该学生已不在本轮可安排名单"));
+        var blocked = blockedPairs(periodId, people);
+        return people.stream().filter(person -> !person.id().equals(applicationId)
+                        && !blocked.contains(MatchingPlanner.Key.of(applicationId, person.id())))
+                .map(person -> MatchingPlanner.manualCandidate(snapshot.policy(), anchor, person)).filter(Objects::nonNull).toList();
+    }
+
     @Transactional(isolation = Isolation.READ_COMMITTED)
-    public RoundView adjust(AuthenticatedUser actor, Long roundId, int revision, Long removeId, Long selectId, String reason,
-                            HttpServletRequest request) {
+    public RoundView adjust(AuthenticatedUser actor, Long roundId, int revision, Long removeId, Long selectId,
+                            Long applicationId, Long partnerId, String reason, HttpServletRequest request) {
         ActivityPeriod period = lockRoundPeriod(roundId);
         MatchRound round = requiredRound(roundId);
         requireEditable(round, period, revision);
-        if (Objects.equals(removeId, selectId)) throw new BusinessException("INVALID_MATCHING_ADJUSTMENT", "请选择拆组或新的候选组合");
+        boolean manual = applicationId != null && partnerId != null;
+        if ((applicationId == null) != (partnerId == null) || manual && selectId != null
+                || !manual && Objects.equals(removeId, selectId)) {
+            throw new BusinessException("INVALID_MATCHING_ADJUSTMENT", "请选择拆组或新的组合");
+        }
         List<MatchCandidate> before = candidateMapper.selectList(Wrappers.<MatchCandidate>lambdaQuery()
                 .eq(MatchCandidate::getRoundId, roundId).eq(MatchCandidate::getAdminConfirmed, true));
         MatchCandidate remove = removeId == null ? null : before.stream().filter(pair -> removeId.equals(pair.getId())).findFirst()
                 .orElseThrow(() -> new BusinessException("INVALID_MATCHING_ADJUSTMENT", "待解除的组合已变更，请刷新"));
-        MatchCandidate selected = selectId == null ? null : requiredCandidate(selectId);
-        if (selected != null && (!roundId.equals(selected.getRoundId()) || !"GENERATED".equals(selected.getStatus())
+        MatchCandidate selected = manual ? manualSelection(round, applicationId, partnerId)
+                : selectId == null ? null : requiredCandidate(selectId);
+        if (selected != null && (!roundId.equals(selected.getRoundId())
+                || selected.getId() != null && !"GENERATED".equals(selected.getStatus())
+                && !(manual && "MANUAL_ONLY".equals(selected.getStatus()))
                 || remove != null && Collections.disjoint(members(remove), members(selected)))) {
             throw new BusinessException("INVALID_MATCHING_ADJUSTMENT", "请选择本轮符合规则的候选组合");
         }
@@ -373,20 +416,32 @@ public class MatchingService {
         for (MatchCandidate candidate : removed) {
             candidate.setAdminConfirmed(false);
             candidate.setManuallySelected(false);
-            candidate.setStatus("GENERATED");
+            candidate.setStatus(map(candidate.getScoreDetail()).get("exceptions") instanceof List<?> exceptions && !exceptions.isEmpty()
+                    ? "MANUAL_ONLY" : "GENERATED");
             candidateMapper.updateById(candidate);
         }
         if (selected != null) {
             selected.setAdminConfirmed(true);
             selected.setManuallySelected(true);
             selected.setStatus("SELECTED");
-            candidateMapper.updateById(selected);
+            if (selected.getId() == null) candidateMapper.insert(selected);
+            else candidateMapper.updateById(selected);
         }
         round.setDraftRevision(round.getDraftRevision() + 1);
         roundMapper.updateById(round);
         auditService.log(actor, "MATCHING_MANUAL_ADJUST", "MATCH_ROUND", roundId,
                 before.stream().map(MatchCandidate::getId).toList(), after.stream().map(MatchCandidate::getId).toList(), reason.strip(), request);
         return roundView(round);
+    }
+
+    private MatchCandidate manualSelection(MatchRound round, Long applicationId, Long partnerId) {
+        var edge = manualCandidates(round, applicationId).stream().filter(candidate ->
+                        partnerId.equals(candidate.first().id()) || partnerId.equals(candidate.second().id())).findFirst()
+                .orElseThrow(() -> new BusinessException("MATCHING_MANUAL_PAIR_UNAVAILABLE", "这两名学生不符合本轮可指定的身份、年级或组合限制"));
+        MatchCandidate existing = candidateMapper.selectOne(Wrappers.<MatchCandidate>lambdaQuery()
+                .eq(MatchCandidate::getRoundId, round.getId()).eq(MatchCandidate::getNavigatorApplicationId, edge.first().id())
+                .eq(MatchCandidate::getClimberApplicationId, edge.second().id()));
+        return existing == null ? newCandidate(round, edge) : existing;
     }
 
     private List<Long> members(MatchCandidate candidate) {

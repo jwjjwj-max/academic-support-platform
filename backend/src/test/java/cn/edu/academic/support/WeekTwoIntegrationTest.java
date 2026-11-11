@@ -450,6 +450,51 @@ class WeekTwoIntegrationTest {
     }
 
     @Test
+    void manualAssignmentCanOverrideThresholdsButKeepsProhibitedPairsOut() {
+        AuthenticatedUser admin = actor(createUser("manual-admin", "ADMIN", "手动组队管理员"));
+        ActivityPeriod period = createPeriod(admin.id(), "MATCHING", "指定搭档");
+        long periodId = period.getId();
+        var navigator = createParticipant(periodId, "manual-nav", "领航学生", "NAVIGATOR", 2025,
+                new BigDecimal("3.00"), "线性代数", "fixture");
+        var original = createParticipant(periodId, "manual-original", "原搭档", "CLIMBER", 2025,
+                new BigDecimal("2.00"), "线性代数", "fixture");
+        var learner = createParticipant(periodId, "manual-learner", "待安排学生", "CLIMBER", 2025,
+                new BigDecimal("4.00"), "英语听说", "fixture");
+        var excluded = createParticipant(periodId, "manual-excluded", "禁止组合成员", "CLIMBER", 2025,
+                new BigDecimal("4.00"), "英语听说", "fixture");
+        workspace.savePolicy(admin, periodId, 0, MatchingPolicy.defaults(2026), request());
+        workspace.setExclusion(admin, periodId, navigator.getId(), excluded.getId(), true, "核实已有私下约组", request());
+
+        var draft = matchingService.preview(admin, periodId, 2, null, null, request());
+        long roundId = draft.round().id();
+        assertThat(draft.candidates()).singleElement().satisfies(pair -> {
+            assertThat(pair.climberApplicationId()).isEqualTo(original.getId());
+            assertThat(pair.status()).isEqualTo("SELECTED");
+        });
+        assertThat(matchingService.manualOptions(roundId, 0, navigator.getId()))
+                .extracting(MatchingService.ManualOption::climberApplicationId).containsExactlyInAnyOrder(original.getId(), learner.getId());
+        assertBusinessError(() -> matchingService.adjust(admin, roundId, 0, null, null, navigator.getId(), excluded.getId(),
+                "尝试禁止组合", request()), "MATCHING_MANUAL_PAIR_UNAVAILABLE");
+
+        var assigned = matchingService.adjust(admin, roundId, 0, null, null, learner.getId(), navigator.getId(), "已核实线下辅导计划", request());
+        var selected = assigned.candidates().stream().filter(pair -> "SELECTED".equals(pair.status())).findFirst().orElseThrow();
+        assertThat(selected.climberApplicationId()).isEqualTo(learner.getId());
+        assertThat(selected.coverage()).containsEntry("exceptions", List.of("领航者绩点未高于攀登者", "课程覆盖未达到本期规则要求"));
+        assertThat(assigned.adjustments()).singleElement().satisfies(log -> {
+            assertThat(log.reason()).isEqualTo("已核实线下辅导计划");
+            assertThat(log.before()).containsExactly(draft.candidates().getFirst().id());
+            assertThat(log.after()).containsExactly(selected.id());
+        });
+        matchingService.adjust(admin, roundId, 1, selected.id(), null, null, null, "暂时拆组", request());
+        assertBusinessError(() -> matchingService.adjust(admin, roundId, 2, null, selected.id(), null, null,
+                "尝试用规则候选恢复", request()), "INVALID_MATCHING_ADJUSTMENT");
+        var restored = matchingService.adjust(admin, roundId, 2, null, null, navigator.getId(), learner.getId(), "复核后恢复组合", request());
+        assertThat(restored.candidates().stream().filter(pair -> "SELECTED".equals(pair.status())))
+                .extracting(MatchCandidateResponse::id).containsExactly(selected.id());
+        matchingService.publish(admin, roundId, 3, request());
+    }
+
+    @Test
     void workbenchOptimizesMutualHelpAndAuditsConflictingManualChanges() {
         AuthenticatedUser admin = actor(createUser("workspace-admin", "ADMIN", "匹配管理员"));
         ActivityPeriod period = createPeriod(admin.id(), "MATCHING", "互助工作台");
@@ -481,7 +526,7 @@ class WeekTwoIntegrationTest {
                 && pair.climberApplicationId().equals(b.getId())).findFirst().orElseThrow();
         assertThat(ac.coverage()).containsKeys("firstToSecond", "secondToFirst");
         assertThat(ac.totalScore()).isNull();
-        var adjusted = matchingService.adjust(admin, roundId, 0, ac.id(), ab.id(), "核实时间后换组", request());
+        var adjusted = matchingService.adjust(admin, roundId, 0, ac.id(), ab.id(), null, null, "核实时间后换组", request());
         assertThat(adjusted.candidates().stream().filter(pair -> "SELECTED".equals(pair.status()))).hasSize(2);
         assertThat(adjusted.candidates().stream().filter(pair -> Boolean.TRUE.equals(pair.manuallySelected())))
                 .extracting(MatchCandidateResponse::id).containsExactly(ab.id());
@@ -490,7 +535,7 @@ class WeekTwoIntegrationTest {
             assertThat(entry.before()).contains(ac.id());
             assertThat(entry.after()).contains(ab.id()).doesNotContain(ac.id());
         });
-        assertBusinessError(() -> matchingService.adjust(admin, roundId, 0, ab.id(), null, "旧弹窗", request()),
+        assertBusinessError(() -> matchingService.adjust(admin, roundId, 0, ab.id(), null, null, null, "旧弹窗", request()),
                 "MATCHING_VERSION_CONFLICT");
         workspace.setExclusion(admin, periodId, b.getId(), a.getId(), true, "已核实私下约组", request());
         assertBusinessError(() -> matchingService.publish(admin, roundId, 1, request()), "MATCHING_VERSION_CONFLICT");

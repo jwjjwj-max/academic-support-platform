@@ -7,7 +7,7 @@ import MatchingRoundPanel from '@/components/MatchingRoundPanel.vue'
 import MatchingRulesEditor from '@/components/MatchingRulesEditor.vue'
 import { apiErrorMessage, http } from '@/services/http'
 import type {
-  ApiResponse, MatchingExclusion, MatchingFacts, MatchingPolicy, MatchingProvider, MatchingRound,
+  ApiResponse, MatchingAdjustment, MatchingExclusion, MatchingFacts, MatchingPolicy, MatchingProvider, MatchingRound,
   MatchingRoundView, MatchingStudent, MatchingWorkspace, Period,
 } from '@/types/api'
 import { labelOf } from '@/utils/labels'
@@ -217,7 +217,7 @@ function rematch() {
   })
 }
 
-function adjust(body: { revision: number; removeId?: number; selectId?: number; reason: string }) {
+function adjust(body: MatchingAdjustment) {
   if (!current.value || !editable.value) return
   const id = current.value.round.id
   return operate(async () => {
