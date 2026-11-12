@@ -12,6 +12,10 @@ import cn.edu.academic.support.application.model.ApplicationProfileSnapshot;
 import cn.edu.academic.support.application.model.ParticipationApplication;
 import cn.edu.academic.support.application.service.ApplicationService;
 import cn.edu.academic.support.common.exception.BusinessException;
+import cn.edu.academic.support.material.dto.PairActionRequest;
+import cn.edu.academic.support.material.dto.PairDetailResponse;
+import cn.edu.academic.support.material.dto.ReflectionSubmitRequest;
+import cn.edu.academic.support.material.service.MaterialService;
 import cn.edu.academic.support.matching.dto.MatchCandidateResponse;
 import cn.edu.academic.support.matching.dto.MatchDecisionRequest;
 import cn.edu.academic.support.matching.dto.MatchingEvidence;
@@ -59,6 +63,7 @@ import static org.mockito.Mockito.verify;
 class WeekTwoIntegrationTest {
     @Autowired MatchingService matchingService;
     @Autowired MatchingWorkspace workspace;
+    @Autowired MaterialService materialService;
     @Autowired JdbcTemplate jdbc;
     @MockitoSpyBean DeepSeekMatchingClient deepSeek;
     @Autowired ApplicationService applicationService;
@@ -447,6 +452,64 @@ class WeekTwoIntegrationTest {
                 .allSatisfy(pair -> assertThat(pair.matchedSubjects()).isEmpty())
                 .anySatisfy(pair -> assertThat(pair.coverage()).containsEntry("sharedStudySubjects", List.of("高等数学")))
                 .anySatisfy(pair -> assertThat(pair.coverage()).containsEntry("sharedStudySubjects", List.of()));
+    }
+
+    @Test
+    void extraNavigatorSlotKeepsTwoIndependentSupportPairs() {
+        AuthenticatedUser admin = actor(createUser("slot-admin", "ADMIN", "特批管理员"));
+        ActivityPeriod period = createPeriod(admin.id(), "MATCHING", "额外名额");
+        long periodId = period.getId();
+        var navigator = createParticipant(periodId, "slot-nav", "领航学生", "NAVIGATOR", 2025,
+                new BigDecimal("4.00"), "线性代数", "fixture");
+        var first = workbenchStudent(periodId, "slot-first", "原搭档", "线性代数");
+        var extra = workbenchStudent(periodId, "slot-extra", "额外搭档", "英语听说");
+        var third = workbenchStudent(periodId, "slot-third", "其他学生", "高等数学");
+        var defaults = MatchingPolicy.defaults(2026);
+        var rules = defaults.rules().stream().map(rule -> rule.kind() == MatchingPolicy.Kind.PEER
+                ? new MatchingPolicy.Rule(rule.kind(), false, 0, null, false, false) : rule).toList();
+        workspace.savePolicy(admin, periodId, 0, new MatchingPolicy(2026, false, rules), request());
+        var draft = matchingService.preview(admin, periodId, 1, null, null, request());
+        long roundId = draft.round().id();
+        var primary = draft.candidates().getFirst();
+        assertThat(primary.climberApplicationId()).isEqualTo(first.getId());
+        assertBusinessError(() -> matchingService.adjust(admin, roundId, 0, null, null, extra.getId(), navigator.getId(),
+                true, "未特批", request()), "MATCHING_EXTRA_SLOT_UNAVAILABLE");
+
+        navigator.setExtraNavigatorSlot(true);
+        applicationMapper.updateById(navigator);
+        var assigned = matchingService.adjust(admin, roundId, 0, null, null, extra.getId(), navigator.getId(),
+                true, "本期特批", request());
+        var added = assigned.candidates().stream().filter(pair -> pair.navigatorSlot() == 2).findFirst().orElseThrow();
+        assertThat(assigned.extraSlotNavigatorIds()).containsExactly(navigator.getId());
+        assertThat(assigned.candidates()).allMatch(pair -> "SELECTED".equals(pair.status()));
+        assertBusinessError(() -> matchingService.adjust(admin, roundId, 1, null, null, third.getId(), navigator.getId(),
+                true, "尝试第三组", request()), "MATCHING_EXTRA_SLOT_UNAVAILABLE");
+
+        matchingService.publish(admin, roundId, 1, request());
+        period.setStatus("CONFIRMATION");
+        periodMapper.updateById(period);
+        var mentor = actor(userMapper.selectById(navigator.getStudentUserId()));
+        var firstLearner = actor(userMapper.selectById(first.getStudentUserId()));
+        var extraLearner = actor(userMapper.selectById(extra.getStudentUserId()));
+        var confirm = new MatchDecisionRequest("CONFIRMED", null);
+        matchingService.decide(mentor, added.id(), confirm, request());
+        long extraPair = matchingService.decide(extraLearner, added.id(), confirm, request()).supportPairId();
+        matchingService.decide(mentor, primary.id(), confirm, request());
+        long primaryPair = matchingService.decide(firstLearner, primary.id(), confirm, request()).supportPairId();
+        assertThat(materialService.mine(mentor.id())).extracting(PairDetailResponse::id)
+                .containsExactlyInAnyOrder(primaryPair, extraPair);
+
+        period.setStatus("ACCEPTANCE");
+        period.setPhotoMin(0);
+        periodMapper.updateById(period);
+        var reflection = new ReflectionSubmitRequest("学习记录".repeat(80));
+        materialService.submitReflection(mentor, primaryPair, reflection, request());
+        materialService.submitReflection(mentor, extraPair, reflection, request());
+        materialService.submitReflection(extraLearner, extraPair, reflection, request());
+        var note = new PairActionRequest("材料齐全");
+        assertThat(materialService.accept(admin, extraPair, note, request()).status()).isEqualTo("COMPLETED");
+        assertBusinessError(() -> materialService.accept(admin, primaryPair, note, request()), "PAIR_MATERIAL_INCOMPLETE");
+        assertThat(supportPairMapper.selectById(primaryPair).getStatus()).isEqualTo("ACTIVE");
     }
 
     @Test

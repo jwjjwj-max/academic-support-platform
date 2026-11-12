@@ -128,6 +128,7 @@ export interface MatchCandidate {
   matchKind?: MatchKind
   coverage?: MatchCoverage
   manuallySelected?: boolean
+  navigatorSlot?: number
 }
 
 export type MatchKind = 'LEGACY' | 'PEER' | 'REGULAR' | 'FRESHMAN_SUPPORT'
@@ -152,6 +153,7 @@ export interface MatchingAdjustment {
   selectId?: number
   applicationId?: number
   partnerId?: number
+  extraSlot?: boolean
   reason: string
 }
 export interface MatchingRule {
@@ -200,6 +202,7 @@ export interface MatchingRoundView {
   round: MatchingRound
   policy?: MatchingPolicy
   participantIds: number[]
+  extraSlotNavigatorIds?: number[]
   participants?: Array<Pick<MatchingStudent, 'id' | 'name' | 'studentNo' | 'grade'>>
   candidates: MatchCandidate[]
   adjustments: Array<{ administrator: string; reason: string; time: string; before: number[]; after: number[] }>

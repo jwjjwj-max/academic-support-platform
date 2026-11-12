@@ -64,7 +64,7 @@ public class MatchingService {
                                List<String> exceptions) {}
     public record RoundView(RoundSummary round, MatchingPolicy policy, List<Long> participantIds,
                             List<MatchCandidateResponse> candidates, List<AdjustmentLog> adjustments,
-                            List<RoundParticipant> participants) {}
+                            List<RoundParticipant> participants, Set<Long> extraSlotNavigatorIds) {}
     private record RuleSnapshot(MatchingPolicy policy, List<Long> participantIds) {}
 
     private static final Map<String, String> SUBJECT_ALIASES = Map.ofEntries(
@@ -321,7 +321,9 @@ public class MatchingService {
                 Wrappers.<ApplicationProfileSnapshot>lambdaQuery().in(ApplicationProfileSnapshot::getApplicationId, ids)).stream()
                 .map(profile -> new RoundParticipant(profile.getApplicationId(), profile.getRealName(), profile.getStudentNo(),
                         profile.getGrade())).toList();
-        return new RoundView(summary(round), snapshot.policy(), snapshot.participantIds(), candidates, adjustments, participants);
+        Set<Long> extraSlotIds = "DRAFT".equals(round.getStatus()) && "NORMAL".equals(round.getRoundType())
+                ? extraSlotNavigators(round.getPeriodId()) : Set.of();
+        return new RoundView(summary(round), snapshot.policy(), snapshot.participantIds(), candidates, adjustments, participants, extraSlotIds);
     }
 
     private List<Long> readIds(String value) {
@@ -387,12 +389,18 @@ public class MatchingService {
     @Transactional(isolation = Isolation.READ_COMMITTED)
     public RoundView adjust(AuthenticatedUser actor, Long roundId, int revision, Long removeId, Long selectId,
                             Long applicationId, Long partnerId, String reason, HttpServletRequest request) {
+        return adjust(actor, roundId, revision, removeId, selectId, applicationId, partnerId, false, reason, request);
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public RoundView adjust(AuthenticatedUser actor, Long roundId, int revision, Long removeId, Long selectId,
+                            Long applicationId, Long partnerId, boolean extraSlot, String reason, HttpServletRequest request) {
         ActivityPeriod period = lockRoundPeriod(roundId);
         MatchRound round = requiredRound(roundId);
         requireEditable(round, period, revision);
         boolean manual = applicationId != null && partnerId != null;
         if ((applicationId == null) != (partnerId == null) || manual && selectId != null
-                || !manual && Objects.equals(removeId, selectId)) {
+                || !manual && Objects.equals(removeId, selectId) || extraSlot && (!manual || removeId != null)) {
             throw new BusinessException("INVALID_MATCHING_ADJUSTMENT", "请选择拆组或新的组合");
         }
         List<MatchCandidate> before = candidateMapper.selectList(Wrappers.<MatchCandidate>lambdaQuery()
@@ -407,7 +415,11 @@ public class MatchingService {
                 || remove != null && Collections.disjoint(members(remove), members(selected)))) {
             throw new BusinessException("INVALID_MATCHING_ADJUSTMENT", "请选择本轮符合规则的候选组合");
         }
-        List<MatchCandidate> removed = before.stream().filter(pair -> pair == remove
+        if (extraSlot && before.stream().anyMatch(pair -> members(pair).contains(selected.getClimberApplicationId()))) {
+            throw new BusinessException("MATCHING_EXTRA_SLOT_CLIMBER_OCCUPIED", "额外名额只能用于待安排的攀登者");
+        }
+        if (selected != null) selected.setNavigatorSlot(extraSlot ? 2 : 1);
+        List<MatchCandidate> removed = extraSlot ? List.of() : before.stream().filter(pair -> pair == remove
                 || selected != null && !Collections.disjoint(members(pair), members(selected))).toList();
         List<MatchCandidate> after = new ArrayList<>(before);
         after.removeAll(removed);
@@ -416,6 +428,7 @@ public class MatchingService {
         for (MatchCandidate candidate : removed) {
             candidate.setAdminConfirmed(false);
             candidate.setManuallySelected(false);
+            candidate.setNavigatorSlot(1);
             candidate.setStatus(map(candidate.getScoreDetail()).get("exceptions") instanceof List<?> exceptions && !exceptions.isEmpty()
                     ? "MANUAL_ONLY" : "GENERATED");
             candidateMapper.updateById(candidate);
@@ -450,8 +463,20 @@ public class MatchingService {
 
     private void validateSelection(MatchRound round, List<MatchCandidate> selected) {
         Set<Long> people = new HashSet<>();
+        Set<Long> usedExtraSlots = new HashSet<>();
         for (MatchCandidate candidate : selected) {
-            for (Long id : members(candidate)) {
+            List<Long> occupied = members(candidate);
+            if (usesExtraSlot(candidate)) {
+                Long navigatorId = candidate.getNavigatorApplicationId();
+                boolean hasPrimary = selected.stream().anyMatch(pair -> !usesExtraSlot(pair)
+                        && !"PEER".equals(pair.getMatchKind()) && navigatorId.equals(pair.getNavigatorApplicationId()));
+                if (!"NORMAL".equals(round.getRoundType()) || "PEER".equals(candidate.getMatchKind()) || !hasPrimary
+                        || !usedExtraSlots.add(navigatorId) || !extraSlotNavigators(round.getPeriodId()).contains(navigatorId)) {
+                    throw new BusinessException("MATCHING_EXTRA_SLOT_UNAVAILABLE", "该领航者没有可用的额外名额，或原帮扶对已变更");
+                }
+                occupied = List.of(candidate.getClimberApplicationId());
+            }
+            for (Long id : occupied) {
                 if (!people.add(id)) throw new BusinessException("MATCHING_STUDENT_OCCUPIED", "同一学生本期只能进入一组");
             }
         }
@@ -468,6 +493,20 @@ public class MatchingService {
                 throw new BusinessException("MATCHING_RULE_CAPACITY", "调整会超过该规则配置的组数上限");
             }
         }
+    }
+
+    private boolean usesExtraSlot(MatchCandidate candidate) {
+        return Integer.valueOf(2).equals(candidate.getNavigatorSlot());
+    }
+
+    private Set<Long> extraSlotNavigators(Long periodId) {
+        return applicationMapper.selectList(Wrappers.<ParticipationApplication>lambdaQuery()
+                        .select(ParticipationApplication::getId).eq(ParticipationApplication::getPeriodId, periodId)
+                        .eq(ParticipationApplication::getExtraNavigatorSlot, true)
+                        .eq(ParticipationApplication::getParticipantRole, "NAVIGATOR")
+                        .eq(ParticipationApplication::getApplicationStatus, "APPROVED")
+                        .eq(ParticipationApplication::getSelectionStatus, "MATCHING_POOL")).stream()
+                .map(ParticipationApplication::getId).collect(Collectors.toSet());
     }
 
     private void requireEditable(MatchRound round, ActivityPeriod period, Integer revision) {
@@ -655,10 +694,14 @@ public class MatchingService {
     }
 
     private void createSupportPair(MatchCandidate candidate, Long periodId) {
+        if (usesExtraSlot(candidate) && !extraSlotNavigators(periodId).contains(candidate.getNavigatorApplicationId())) {
+            throw new BusinessException("MATCHING_EXTRA_SLOT_UNAVAILABLE", "该领航者没有可用的额外名额，请联系管理员");
+        }
         SupportPair pair = new SupportPair();
         pair.setPeriodId(periodId);
         pair.setPairNo("PAIR-" + periodId + "-" + candidate.getId());
         pair.setNavigatorApplicationId(candidate.getNavigatorApplicationId());
+        pair.setNavigatorSlot(usesExtraSlot(candidate) ? 2 : 1);
         pair.setClimberApplicationId(candidate.getClimberApplicationId());
         pair.setSourceCandidateId(candidate.getId());
         pair.setMatchKind(candidate.getMatchKind());
@@ -784,7 +827,7 @@ public class MatchingService {
                 cp.getMajor(), cp.getGrade(), candidate.getNavigatorDecision(), candidate.getClimberDecision(),
                 candidate.getRejectionReason(), partnerWechat, partnerPhone, pair == null ? null : pair.getId(),
                 candidate.getMatchKind(), !studentView && !legacy ? map(candidate.getScoreDetail()) : null,
-                studentView ? null : candidate.getManuallySelected());
+                studentView ? null : candidate.getManuallySelected(), studentView ? null : candidate.getNavigatorSlot());
     }
 
     private void requireRoundOperationStage(MatchRound round, ActivityPeriod period) {

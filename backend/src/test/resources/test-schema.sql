@@ -128,6 +128,7 @@ CREATE TABLE application (
   period_id BIGINT NOT NULL,
   student_user_id BIGINT NOT NULL,
   participant_role VARCHAR(20) NOT NULL,
+  extra_navigator_slot BOOLEAN NOT NULL DEFAULT FALSE,
   cumulative_gpa DECIMAL(4,2) NOT NULL,
   subjects_json VARCHAR(2000) NOT NULL,
   statement_text VARCHAR(1000) NOT NULL,
@@ -188,6 +189,7 @@ CREATE TABLE match_candidate (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   round_id BIGINT NOT NULL,
   navigator_application_id BIGINT NOT NULL,
+  navigator_slot TINYINT NOT NULL DEFAULT 1 CHECK (navigator_slot IN (1, 2)),
   climber_application_id BIGINT NOT NULL,
   total_score DECIMAL(5,2) NOT NULL,
   score_detail VARCHAR(8000) NOT NULL,
@@ -226,6 +228,7 @@ CREATE TABLE support_pair (
   period_id BIGINT NOT NULL,
   pair_no VARCHAR(40) NOT NULL UNIQUE,
   navigator_application_id BIGINT NOT NULL,
+  navigator_slot TINYINT NOT NULL DEFAULT 1 CHECK (navigator_slot IN (1, 2)),
   climber_application_id BIGINT NOT NULL,
   source_candidate_id BIGINT,
   match_kind VARCHAR(24) NOT NULL DEFAULT 'LEGACY',
@@ -238,7 +241,7 @@ CREATE TABLE support_pair (
   ended_at TIMESTAMP,
   end_reason VARCHAR(500),
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(period_id, navigator_application_id),
+  UNIQUE(period_id, navigator_application_id, navigator_slot),
   UNIQUE(period_id, climber_application_id)
 );
 

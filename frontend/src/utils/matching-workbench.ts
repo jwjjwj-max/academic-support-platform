@@ -19,9 +19,9 @@ export function selectedPairs(view?: MatchingRoundView | null) {
   return view?.candidates.filter(pair => ['SELECTED', 'PUBLISHED', 'CONFIRMED', 'REJECTED'].includes(pair.status)) ?? []
 }
 
-export function adjustmentImpact(view: MatchingRoundView, removeId?: number, replacement?: PairAssignment) {
+export function adjustmentImpact(view: MatchingRoundView, removeId?: number, replacement?: PairAssignment, extraSlot = false) {
   const before = selectedPairs(view)
-  const conflicts = new Set(replacement ? members(replacement) : [])
+  const conflicts = new Set(replacement && !extraSlot ? members(replacement) : [])
   const removed = before.filter(pair => pair.id === removeId || members(pair).some(id => conflicts.has(id)))
   const after: PairAssignment[] = before.filter(pair => !removed.includes(pair))
   if (replacement) after.push(replacement)

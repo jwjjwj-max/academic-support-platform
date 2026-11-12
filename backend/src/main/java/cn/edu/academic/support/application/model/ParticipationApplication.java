@@ -18,6 +18,7 @@ public class ParticipationApplication {
     private Long periodId;
     private Long studentUserId;
     private String participantRole;
+    private Boolean extraNavigatorSlot;
     private BigDecimal cumulativeGpa;
     private String subjectsJson;
     private String statementText;

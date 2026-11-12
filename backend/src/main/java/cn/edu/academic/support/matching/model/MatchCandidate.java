@@ -15,6 +15,7 @@ public class MatchCandidate {
     private Long id;
     private Long roundId;
     private Long navigatorApplicationId;
+    private Integer navigatorSlot;
     private Long climberApplicationId;
     private BigDecimal totalScore;
     private String scoreDetail;

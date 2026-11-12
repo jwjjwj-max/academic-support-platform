@@ -23,6 +23,7 @@ const manualMode = ref(false)
 const manualAnchor = ref<number>()
 const partnerId = ref<number | ''>('')
 const partnerQuery = ref('')
+const useExtraSlot = ref(false)
 const manualOptions = ref<ManualMatchOption[]>([])
 const manualLoading = ref(false)
 const manualError = ref('')
@@ -72,6 +73,16 @@ const options = computed(() => {
 })
 const replacement = computed(() => options.value.find(pair => pair.id === choice.value))
 const manualPartner = computed(() => manualOptions.value.find(pair => otherMember(pair) === partnerId.value))
+const canUseExtraSlot = computed(() => {
+  const partner = manualPartner.value
+  if (!manualMode.value || !partner || editing.value?.pair || partner.matchKind === 'PEER'
+      || occupied.value.has(partner.climberApplicationId)
+      || !props.view.extraSlotNavigatorIds?.includes(partner.navigatorApplicationId)) return false
+  const assigned = selected.value.filter(pair => members(pair).includes(partner.navigatorApplicationId))
+  return assigned.length === 1 && assigned[0].navigatorApplicationId === partner.navigatorApplicationId
+    && assigned[0].matchKind !== 'PEER' && assigned[0].navigatorSlot !== 2
+})
+const addingExtraPair = computed(() => canUseExtraSlot.value && useExtraSlot.value)
 const visiblePartners = computed(() => {
   const query = partnerQuery.value.trim().toLowerCase()
   return manualOptions.value.filter(pair => personIdentity(otherMember(pair)).toLowerCase().includes(query))
@@ -79,7 +90,7 @@ const visiblePartners = computed(() => {
 const impact = computed(() => {
   const next = manualMode.value ? manualPartner.value : replacement.value
   if (next || !manualMode.value && choice.value === 'dissolve') {
-    return adjustmentImpact(props.view, editing.value?.pair?.id, next)
+    return adjustmentImpact(props.view, editing.value?.pair?.id, next, addingExtraPair.value)
   }
 })
 const changes = computed(() => {
@@ -93,6 +104,7 @@ const changes = computed(() => {
   ]
 })
 watch(() => [props.view.round.id, props.view.round.draftRevision, props.editable], () => { editing.value = undefined })
+watch(canUseExtraSlot, available => { useExtraSlot.value = available })
 watch(() => editing.value && manualMode.value ? manualAnchor.value : undefined, async (anchor, _previous, onCleanup) => {
   manualOptions.value = []
   partnerId.value = ''
@@ -109,8 +121,8 @@ watch(() => editing.value && manualMode.value ? manualAnchor.value : undefined, 
       params: { applicationId: anchor, revision }, signal: controller.signal,
     })
     if (!controller.signal.aborted) {
-      const existingPartner = selected.value.find(pair => members(pair).includes(anchor))
-      manualOptions.value = response.data.data.filter(option => !existingPartner || !members(existingPartner).includes(otherMember(option)))
+      const existingPartners = new Set(selected.value.filter(pair => members(pair).includes(anchor)).flatMap(members))
+      manualOptions.value = response.data.data.filter(option => !existingPartners.has(otherMember(option)))
     }
   } catch (error) {
     if (!controller.signal.aborted) manualError.value = apiErrorMessage(error)
@@ -144,7 +156,8 @@ function save() {
   if (!props.editable || props.view.round.draftRevision == null || !impact.value?.valid || !reason.value.trim()) return
   const body = { revision: props.view.round.draftRevision, removeId: editing.value?.pair?.id, reason: reason.value.trim() }
   if (manualMode.value && manualPartner.value) {
-    emit('adjust', { ...body, applicationId: manualAnchor.value, partnerId: otherMember(manualPartner.value) })
+    emit('adjust', { ...body, applicationId: manualAnchor.value, partnerId: otherMember(manualPartner.value),
+      ...(addingExtraPair.value ? { extraSlot: true } : {}) })
   } else {
     emit('adjust', { ...body, selectId: replacement.value?.id })
   }
@@ -203,7 +216,8 @@ function pendingReason(id: number) {
               <td class="identity">{{ personIdentity(pair.navigatorApplicationId, pair.navigatorName) }}</td>
               <td class="identity">{{ personIdentity(pair.climberApplicationId, pair.climberName) }}</td>
               <td>{{ matchKindLabel(pair.matchKind) }}
-                <small v-if="pair.manuallySelected">{{ pair.coverage?.exceptions?.length ? '人工例外' : '人工调整' }}</small>
+                <small v-if="pair.navigatorSlot === 2">领航者额外名额</small>
+                <small v-else-if="pair.manuallySelected">{{ pair.coverage?.exceptions?.length ? '人工例外' : '人工调整' }}</small>
                 <small v-if="view.round.status === 'PUBLISHED'">{{ labelOf(pair.status) }}</small>
               </td>
               <td>
@@ -312,11 +326,15 @@ function pendingReason(id: number) {
               {{ personIdentity(otherMember(option)) }} · {{ matchKindLabel(option.matchKind) }}{{ option.exceptions.length ? ' · 需例外' : '' }}
             </option>
           </select></label>
+          <label v-if="canUseExtraSlot" class="extra-slot-choice">
+            <input v-model="useExtraSlot" type="checkbox" :disabled="busy" />保留原帮扶对，使用本期额外名额
+          </label>
           <p v-if="manualError" class="text-danger" role="alert">{{ manualError }}</p>
         </template>
         <div v-if="impact" class="notice warning" role="status">
           <template v-if="manualMode && manualPartner && manualAnchor != null">
             <p>组建 · {{ personIdentity(manualAnchor) }} 与 {{ personIdentity(otherMember(manualPartner)) }}</p>
+            <p v-if="addingExtraPair">保留现有帮扶对，两组独立确认和验收。</p>
             <p v-if="manualPartner.exceptions.length">人工例外 · {{ manualPartner.exceptions.join('、') }}</p>
           </template>
           <p v-if="!manualMode && replacement">组建 · {{ pairIdentity(replacement) }}<template v-if="replacement.matchedSubjects.length">（{{ replacement.matchedSubjects.join('、') }}）</template></p>
@@ -336,6 +354,8 @@ function pendingReason(id: number) {
 .round-panel { display:grid; gap:10px; }
 .round-summary { display:flex; flex-wrap:wrap; gap:4px 20px; font-size:13px; color:var(--muted); }
 .round-actions { flex-wrap:wrap; }
+.extra-slot-choice { display:flex; align-items:center; gap:8px; }
+.extra-slot-choice input { width:auto; min-height:0; }
 .waiting-chart { display:grid; gap:6px; width:min(100%, 420px); margin:0 0 4px; }
 .waiting-chart figcaption { font-size:14px; font-weight:650; }
 .waiting-chart-row { display:grid; grid-template-columns:2.5em minmax(0, 1fr) 4em; align-items:center; gap:8px; font-size:13px; }

@@ -15,6 +15,7 @@ public class SupportPair {
     private Long periodId;
     private String pairNo;
     private Long navigatorApplicationId;
+    private Integer navigatorSlot;
     private Long climberApplicationId;
     private Long sourceCandidateId;
     private String matchKind;
