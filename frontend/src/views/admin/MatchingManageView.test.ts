@@ -68,6 +68,39 @@ it('shows only the selected panel and keeps editing controls out of round histor
   }
 })
 
+it('shows both student decisions and lets the administrator record changed consent from the published round', async () => {
+  rounds = [makeRound(1, 'PUBLISHED')]
+  const candidate = {
+    id: 20, status: 'REJECTED', navigatorName: '测试领航者', climberName: '测试攀登者',
+    navigatorApplicationId: 11, climberApplicationId: 12, navigatorDecision: 'REJECTED', climberDecision: 'PENDING',
+    rejectionReason: '需要商量',
+  }
+  vi.mocked(http.get).mockImplementation(async url => ({ data: { data:
+    url === '/periods' ? [{ id: 1, name: '本期', status: 'CONFIRMATION', confirmationDeadline: '2000-01-01T00:00:00' }]
+      : url === base ? workspace : url === `${base}/rounds` ? rounds : url === `${base}/rounds/1`
+        ? { round: rounds[0], candidates: [candidate], participants: [{ id: 11, studentNo: 'TEST11' }], adjustments: [] } : {},
+  } }))
+  vi.mocked(http.post).mockResolvedValueOnce({})
+  const wrapper = mount(MatchingManageView)
+  await flushPromises()
+  try {
+    const table = wrapper.get('[aria-label="已发布组合的确认状态"]')
+    expect(table.text()).toContain('测试领航者（TEST11）已拒绝')
+    expect(table.text()).toContain('测试攀登者待确认')
+    await table.get('button').trigger('click')
+    const dialog = wrapper.get('dialog')
+    expect(dialog.text()).toContain('另一方仍需确认')
+    expect(dialog.text()).toContain('本期确认已截止')
+    await dialog.get('textarea').setValue('电话核实后同意')
+    await dialog.get('form').trigger('submit')
+    await flushPromises()
+    expect(http.post).toHaveBeenLastCalledWith('/admin/matching/candidates/20/reconsideration', { reason: '电话核实后同意' })
+    expect(wrapper.find('dialog').exists()).toBe(false)
+  } finally {
+    wrapper.unmount()
+  }
+})
+
 it('saves outbound permission independently of an unfinished matching rule edit', async () => {
   const wrapper = mount(MatchingManageView)
   await flushPromises()

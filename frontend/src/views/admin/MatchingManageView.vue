@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { isAxiosError } from 'axios'
+import MatchingConfirmationPanel from '@/components/MatchingConfirmationPanel.vue'
 import MatchingEvidencePanel from '@/components/MatchingEvidencePanel.vue'
 import MatchingExclusionsPanel from '@/components/MatchingExclusionsPanel.vue'
 import MatchingRoundPanel from '@/components/MatchingRoundPanel.vue'
@@ -27,6 +28,7 @@ const rounds = ref<MatchingRound[]>([])
 const current = ref<MatchingRoundView>()
 const previous = ref<MatchingRoundView>()
 const historical = ref<MatchingRoundView>()
+const publishedViews = ref<MatchingRoundView[]>([])
 const analysisFailures = ref<Record<number, string>>({})
 const loading = ref(true), busy = ref(false), error = ref(''), success = ref(''), progress = ref('')
 let readSequence = 0
@@ -40,6 +42,8 @@ const canEditRules = computed(() => !published.value && ['REVIEW', 'MATCHING'].i
 const canEditEvidence = computed(() => ['REVIEW', 'MATCHING', 'CONFIRMATION'].includes(period.value?.status ?? ''))
 const canPreview = computed(() => canGenerateMatching(period.value?.status) && !published.value)
 const canRematch = computed(() => canGenerateLocalRematch(period.value?.status))
+const deadlinePassed = computed(() => Boolean(period.value?.confirmationDeadline
+  && new Date(period.value.confirmationDeadline).getTime() <= Date.now()))
 const draftOpen = computed(() => current.value?.round.status === 'DRAFT' && canOperateRound(period.value?.status, current.value.round.roundType))
 const stale = computed(() => !!current.value?.policy && current.value.round.workspaceRevision !== workspace.value?.settings.revision)
 const editable = computed(() => Boolean(draftOpen.value && !stale.value && current.value?.policy))
@@ -58,20 +62,22 @@ async function refresh() {
   ])
   const latest = list.find(round => round.status === 'DRAFT') ?? list.find(round => round.status === 'PUBLISHED')
   const last = latest?.status === 'DRAFT' ? list.find(round => round.roundNo < latest.roundNo) : undefined
-  const [active, compare] = await Promise.all([
-    latest ? fetchData<MatchingRoundView>(`${path}/rounds/${latest.id}`) : undefined,
-    last ? fetchData<MatchingRoundView>(`${path}/rounds/${last.id}`) : undefined,
-  ])
+  const publishedRounds = list.filter(round => round.status === 'PUBLISHED')
+  const toRead = new Map([...publishedRounds, latest, last].flatMap(round => round ? [[round.id, round] as const] : []))
+  const views = new Map(await Promise.all([...toRead.keys()].map(async id =>
+    [id, await fetchData<MatchingRoundView>(`${path}/rounds/${id}`)] as const)))
   if (sequence !== readSequence) return
   workspace.value = settings
   rounds.value = list
-  current.value = active
-  previous.value = compare
+  current.value = latest && views.get(latest.id)
+  previous.value = last && views.get(last.id)
+  publishedViews.value = publishedRounds.map(round => views.get(round.id)!)
 }
 
 async function loadPeriod() {
   if (!periodId.value) return
   historical.value = undefined
+  publishedViews.value = []
   analysisFailures.value = {}
   workspace.value = undefined
   current.value = undefined
@@ -227,6 +233,14 @@ function adjust(body: MatchingAdjustment) {
   })
 }
 
+function reconsider(candidateId: number, reason: string) {
+  return operate(async () => {
+    await http.post(`/admin/matching/candidates/${candidateId}/reconsideration`, { reason })
+    await refresh()
+    success.value = '已登记原拒绝方改为同意。'
+  })
+}
+
 function discard() {
   if (!current.value || !draftOpen.value || !window.confirm('确认放弃这份草稿？原方案及人工调整仍可在轮次记录中查看。')) return
   const round = current.value.round
@@ -313,6 +327,8 @@ onMounted(async () => {
       </div>
       <div v-if="stale && draftOpen" class="notice warning" role="status">规则或依据已更新。请重新试算后再调整和发布。局部重匹配草稿可放弃后重算。</div>
       <MatchingRoundPanel v-if="current?.round.status === 'DRAFT'" :view="current" :previous="previous" :students="workspace.students" :editable="editable" :busy="busy" @adjust="adjust" />
+      <MatchingConfirmationPanel v-if="publishedViews.length" :views="publishedViews" :can-reconsider="canRematch"
+        :deadline-passed="deadlinePassed" :busy="busy" @reconsider="reconsider" />
     </section>
     <section v-if="tab === 'history'" aria-label="轮次记录" data-panel="history">
       <section class="card">

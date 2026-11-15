@@ -338,6 +338,58 @@ class WeekTwoIntegrationTest {
     }
 
     @Test
+    void administratorRecordsChangedConsentAndPreservesTheOtherDecision() {
+        AuthenticatedUser admin = actor(createUser("consent-admin", "ADMIN", "确认管理员"));
+        ActivityPeriod period = createPeriod(admin.id(), "MATCHING", "恢复原组合");
+        long periodId = period.getId();
+        var mentor = createParticipant(periodId, "consent-nav", "领航学生", "NAVIGATOR", 2025,
+                new BigDecimal("4.00"), "线性代数", "fixture");
+        var learner = createParticipant(periodId, "consent-climb", "攀登学生", "CLIMBER", 2025,
+                new BigDecimal("2.00"), "线性代数", "fixture");
+        var nextMentor = createParticipant(periodId, "consent-next-nav", "另一领航学生", "NAVIGATOR", 2025,
+                new BigDecimal("4.00"), "英语听说", "fixture");
+        var nextLearner = createParticipant(periodId, "consent-next-climb", "另一攀登学生", "CLIMBER", 2025,
+                new BigDecimal("2.00"), "英语听说", "fixture");
+        workspace.savePolicy(admin, periodId, 0, MatchingPolicy.defaults(2026), request());
+        var draft = matchingService.preview(admin, periodId, 1, null, null, request());
+        var firstPair = draft.candidates().stream().filter(pair -> pair.climberApplicationId().equals(learner.getId())).findFirst().orElseThrow();
+        var secondPair = draft.candidates().stream().filter(pair -> pair.climberApplicationId().equals(nextLearner.getId())).findFirst().orElseThrow();
+        matchingService.publish(admin, draft.round().id(), 0, request());
+        period.setStatus("CONFIRMATION");
+        periodMapper.updateById(period);
+        var confirm = new MatchDecisionRequest("CONFIRMED", null);
+        var reject = new MatchDecisionRequest("REJECTED", "需要商量学习安排");
+        var firstLearner = actor(userMapper.selectById(learner.getStudentUserId()));
+        matchingService.decide(actor(userMapper.selectById(mentor.getStudentUserId())), firstPair.id(), reject, request());
+        matchingService.decide(actor(userMapper.selectById(nextMentor.getStudentUserId())), secondPair.id(), confirm, request());
+        matchingService.decide(actor(userMapper.selectById(nextLearner.getStudentUserId())), secondPair.id(), reject, request());
+        period.setConfirmationDeadline(LocalDateTime.now().minusMinutes(1));
+        periodMapper.updateById(period);
+
+        matchingService.recordReconsideration(admin, firstPair.id(), "已向领航学生核实同意", request());
+        assertThat(candidateMapper.selectById(firstPair.id())).satisfies(pair -> {
+            assertThat(pair.getStatus()).isEqualTo("PUBLISHED");
+            assertThat(pair.getNavigatorDecision()).isEqualTo("CONFIRMED");
+            assertThat(pair.getClimberDecision()).isEqualTo("PENDING");
+            assertThat(pair.getRejectionReason()).isNull();
+        });
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM support_pair WHERE source_candidate_id=?", Integer.class, firstPair.id())).isZero();
+        assertBusinessError(() -> matchingService.decide(firstLearner, firstPair.id(), confirm, request()), "MATCHING_CONFIRMATION_ENDED");
+
+        matchingService.recordReconsideration(admin, secondPair.id(), "已向攀登学生核实同意", request());
+        assertThat(candidateMapper.selectById(secondPair.id()).getStatus()).isEqualTo("CONFIRMED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM support_pair WHERE source_candidate_id=?", Integer.class, secondPair.id())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM rejected_match_pair WHERE period_id=? AND active=FALSE AND released_by=?",
+                Integer.class, periodId, admin.id())).isEqualTo(2);
+        assertBusinessError(() -> matchingService.recordReconsideration(admin, secondPair.id(), "重复提交", request()),
+                "MATCHING_RECONSIDERATION_UNAVAILABLE");
+
+        period.setConfirmationDeadline(LocalDateTime.now().plusHours(1));
+        periodMapper.updateById(period);
+        assertThat(matchingService.decide(firstLearner, firstPair.id(), confirm, request()).status()).isEqualTo("CONFIRMED");
+    }
+
+    @Test
     void rejectionOnlyRematchesAffectedStudentsAndRejectedCombinationIsExcluded() {
         AuthenticatedUser admin = actor(createUser("week2-reject-admin", "ADMIN", "拒绝流程管理员"));
         ActivityPeriod period = createPeriod(admin.id(), "MATCHING", "拒绝后局部重匹配测试");
@@ -371,6 +423,8 @@ class WeekTwoIntegrationTest {
                         && candidate.climberApplicationId().equals(rejectedCandidate.climberApplicationId())).isTrue());
         MatchCandidateResponse localAlternative = second.stream().filter(item -> "GENERATED".equals(item.status())).findFirst().orElseThrow();
         matchingService.select(admin, localAlternative.id(), request());
+        assertBusinessError(() -> matchingService.recordReconsideration(admin, rejectedCandidate.id(), "原学生改为同意", request()),
+                "MATCHING_STUDENT_OCCUPIED");
         matchingService.publish(admin, localAlternative.roundId(), request());
         assertBusinessError(() -> matchingService.rematch(admin, period.getId(), request()), "NO_PENDING_REJECTION");
         assertThat(candidateMapper.selectById(rejectedCandidate.id()).getStatus()).isEqualTo("REJECTED");

@@ -693,6 +693,91 @@ public class MatchingService {
         return response(candidate, true, actor.id());
     }
 
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public void recordReconsideration(AuthenticatedUser actor, Long candidateId, String reason, HttpServletRequest request) {
+        ActivityPeriod period = lockCandidatePeriod(candidateId);
+        MatchCandidate candidate = requiredCandidate(candidateId);
+        MatchRound round = requiredRound(candidate.getRoundId());
+        if (!"CONFIRMATION".equals(period.getStatus()) || !"PUBLISHED".equals(round.getStatus())
+                || !"REJECTED".equals(candidate.getStatus())) {
+            throw new BusinessException("MATCHING_RECONSIDERATION_UNAVAILABLE", "仅双方确认阶段的已拒绝组合可登记改为同意");
+        }
+        long periodId = period.getId();
+        Long navigatorId = candidate.getNavigatorApplicationId(), climberId = candidate.getClimberApplicationId();
+        if (workspace.blocked(periodId).contains(MatchingPlanner.Key.of(navigatorId, climberId))) {
+            throw new BusinessException("MATCHING_PAIR_EXCLUDED", "该组合已登记为禁止组合");
+        }
+        requireReconsiderationCapacity(candidate, periodId);
+        Long navigatorUserId = applicationMapper.selectById(navigatorId).getStudentUserId();
+        Long climberUserId = applicationMapper.selectById(climberId).getStudentUserId();
+        boolean navigatorRejected = "REJECTED".equals(candidate.getNavigatorDecision());
+        Long rejectedBy = navigatorRejected ? navigatorUserId : climberUserId;
+        List<RejectedMatchPair> activeRejections = rejectedPairMapper.selectList(Wrappers.<RejectedMatchPair>lambdaQuery()
+                .eq(RejectedMatchPair::getPeriodId, periodId).eq(RejectedMatchPair::getActive, true)
+                .and(query -> query.eq(RejectedMatchPair::getNavigatorUserId, navigatorUserId)
+                        .eq(RejectedMatchPair::getClimberUserId, climberUserId)
+                        .or(reverse -> reverse.eq(RejectedMatchPair::getNavigatorUserId, climberUserId)
+                                .eq(RejectedMatchPair::getClimberUserId, navigatorUserId))));
+        if (activeRejections.size() != 1 || !rejectedBy.equals(activeRejections.getFirst().getRejectedBy())) {
+            throw new BusinessException("MATCHING_RECONSIDERATION_UNAVAILABLE", "无法核对原拒绝记录，请刷新后查看组合状态");
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        if (navigatorRejected) {
+            candidate.setNavigatorDecision("CONFIRMED");
+            candidate.setNavigatorDecidedAt(now);
+        } else {
+            candidate.setClimberDecision("CONFIRMED");
+            candidate.setClimberDecidedAt(now);
+        }
+        boolean bothConfirmed = "CONFIRMED".equals(candidate.getNavigatorDecision()) && "CONFIRMED".equals(candidate.getClimberDecision());
+        candidate.setStatus(bothConfirmed ? "CONFIRMED" : "PUBLISHED");
+        candidate.setRejectionReason(null);
+        candidateMapper.updateById(candidate);
+        RejectedMatchPair rejection = activeRejections.getFirst();
+        rejection.setActive(false);
+        rejection.setReleasedBy(actor.id());
+        rejection.setReleasedAt(now);
+        rejection.setReleaseReason(reason.strip());
+        rejectedPairMapper.updateById(rejection);
+        if (bothConfirmed) createSupportPair(candidate, periodId);
+        auditService.log(actor, "MATCHING_RECONSIDERATION", "MATCH_CANDIDATE", candidateId,
+                Map.of("status", "REJECTED", "rejectionId", rejection.getId()),
+                Map.of("status", candidate.getStatus(), "reconsideredBy", rejectedBy), reason.strip(), request);
+    }
+
+    private void requireReconsiderationCapacity(MatchCandidate candidate, long periodId) {
+        if (usesExtraSlot(candidate) && !extraSlotNavigators(periodId).contains(candidate.getNavigatorApplicationId())) {
+            throw new BusinessException("MATCHING_EXTRA_SLOT_UNAVAILABLE", "该领航者的额外名额已不可用");
+        }
+        List<Long> participants = members(candidate);
+        List<Long> roundIds = roundMapper.selectList(Wrappers.<MatchRound>lambdaQuery()
+                        .eq(MatchRound::getPeriodId, periodId).in(MatchRound::getStatus, List.of("PUBLISHED", "DRAFT")))
+                .stream().map(MatchRound::getId).toList();
+        boolean candidateConflict = candidateMapper.selectList(Wrappers.<MatchCandidate>lambdaQuery()
+                        .in(MatchCandidate::getRoundId, roundIds).in(MatchCandidate::getStatus, List.of("SELECTED", "PUBLISHED", "CONFIRMED"))
+                        .and(query -> query.in(MatchCandidate::getNavigatorApplicationId, participants)
+                                .or().in(MatchCandidate::getClimberApplicationId, participants))).stream()
+                .anyMatch(other -> conflictsWithReconsideration(candidate, other.getNavigatorApplicationId(),
+                        other.getClimberApplicationId(), other.getNavigatorSlot(), other.getMatchKind()));
+        boolean formalConflict = supportPairMapper.selectList(Wrappers.<SupportPair>lambdaQuery().eq(SupportPair::getPeriodId, periodId)
+                        .and(query -> query.in(SupportPair::getNavigatorApplicationId, participants)
+                                .or().in(SupportPair::getClimberApplicationId, participants))).stream()
+                .anyMatch(other -> conflictsWithReconsideration(candidate, other.getNavigatorApplicationId(),
+                        other.getClimberApplicationId(), other.getNavigatorSlot(), other.getMatchKind()));
+        if (candidateConflict || formalConflict) {
+            throw new BusinessException("MATCHING_STUDENT_OCCUPIED", "原组合成员已有其他安排，请先核对当前草稿和已发布方案");
+        }
+    }
+
+    private boolean conflictsWithReconsideration(MatchCandidate candidate, Long navigatorId, Long climberId,
+                                                 Integer navigatorSlot, String matchKind) {
+        if (candidate.getClimberApplicationId().equals(navigatorId) || members(candidate).contains(climberId)) return true;
+        return candidate.getNavigatorApplicationId().equals(navigatorId)
+                && (usesExtraSlot(candidate) == Integer.valueOf(2).equals(navigatorSlot)
+                || "PEER".equals(matchKind) || "PEER".equals(candidate.getMatchKind()));
+    }
+
     private void createSupportPair(MatchCandidate candidate, Long periodId) {
         if (usesExtraSlot(candidate) && !extraSlotNavigators(periodId).contains(candidate.getNavigatorApplicationId())) {
             throw new BusinessException("MATCHING_EXTRA_SLOT_UNAVAILABLE", "该领航者没有可用的额外名额，请联系管理员");

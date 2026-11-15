@@ -1,6 +1,8 @@
 package cn.edu.academic.support.matching.model;
 
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
@@ -28,6 +30,7 @@ public class MatchCandidate {
     private LocalDateTime navigatorDecidedAt;
     private String climberDecision;
     private LocalDateTime climberDecidedAt;
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
     private String rejectionReason;
     private LocalDateTime publishedAt;
     private LocalDateTime createdAt;

@@ -42,6 +42,7 @@ public class MatchingWorkspaceController {
                                     boolean extraSlot,
                                     @NotBlank @Size(max = 500) String reason) {}
     public record DiscardRequest(@Min(0) Integer revision, @NotBlank @Size(max = 500) String reason) {}
+    public record ReconsiderationRequest(@NotBlank @Size(max = 500) String reason) {}
     public record KeyRequest(@NotBlank @Size(max = 256) String apiKey) {}
 
     @GetMapping("/periods/{periodId}/workspace")
@@ -112,6 +113,13 @@ public class MatchingWorkspaceController {
     public ApiResponse<Void> discard(@AuthenticationPrincipal AuthenticatedUser actor, @PathVariable Long roundId,
             @Valid @RequestBody DiscardRequest body, HttpServletRequest request) {
         matching.discard(actor, roundId, body.revision(), body.reason(), request);
+        return ApiResponse.success();
+    }
+
+    @PostMapping("/candidates/{candidateId}/reconsideration")
+    public ApiResponse<Void> recordReconsideration(@AuthenticationPrincipal AuthenticatedUser actor,
+            @PathVariable Long candidateId, @Valid @RequestBody ReconsiderationRequest body, HttpServletRequest request) {
+        matching.recordReconsideration(actor, candidateId, body.reason(), request);
         return ApiResponse.success();
     }
 
