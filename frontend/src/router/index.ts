@@ -12,7 +12,7 @@ const router = createRouter({
       path: '/', component: () => import('@/layouts/AppLayout.vue'),
       children: [
         { path: 'dashboard', component: () => import('@/views/DashboardView.vue'), meta: { title: '首页' } },
-        { path: 'profile', component: () => import('@/views/ProfileView.vue'), meta: { title: '个人资料', roles: ['STUDENT'] } },
+        { path: 'profile', component: () => import('@/views/ProfileView.vue'), meta: { title: '个人资料' } },
         { path: 'applications', component: () => import('@/views/ApplicationView.vue'), meta: { title: '期次报名', roles: ['STUDENT'] } },
         { path: 'matching', component: () => import('@/views/MatchingView.vue'), meta: { title: '我的匹配', roles: ['STUDENT'] } },
         { path: 'materials', component: () => import('@/views/MaterialsView.vue'), meta: { title: '帮扶材料', roles: ['STUDENT'] } },

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { COLLEGE, MAJORS } from '@/constants/academic'
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { http, apiErrorMessage } from '@/services/http'
 import { useAuthStore } from '@/stores/auth'
 import type { ApiResponse, StudentProfile } from '@/types/api'
 
 const auth = useAuthStore()
+const staffAccount = computed(() => auth.user?.accountType === 'ADMIN' || auth.user?.accountType === 'SYSTEM_OWNER' ? auth.user : null)
 const form = reactive({ studentNo: '', realName: '', college: COLLEGE, major: '', grade: 2026, wechat: '', phone: '' })
 const profile = ref<StudentProfile | null>(null)
 const loading = ref(true), saving = ref(false), error = ref(''), success = ref('')
@@ -13,11 +14,19 @@ const loading = ref(true), saving = ref(false), error = ref(''), success = ref('
 function apply(value: StudentProfile) { profile.value = value; Object.assign(form, value, { college: COLLEGE, major: MAJORS.some(major => major === value.major) ? value.major : '' }) }
 async function load() { loading.value = true; try { apply((await http.get<ApiResponse<StudentProfile>>('/students/me/profile')).data.data) } catch (e) { error.value = apiErrorMessage(e) } finally { loading.value = false } }
 async function save() { saving.value = true; error.value = ''; success.value = ''; try { apply((await http.put<ApiResponse<StudentProfile>>('/students/me/profile', form)).data.data); await auth.loadUser(); success.value = '资料已保存。身份资料发生变化时，账号将重新进入审核。' } catch (e) { error.value = apiErrorMessage(e) } finally { saving.value = false } }
-onMounted(load)
+onMounted(() => { if (!staffAccount.value) void load() })
 </script>
 
 <template>
-  <div v-if="loading" class="loading-state">正在加载资料…</div>
+  <section v-if="staffAccount" class="card">
+    <header><h2>账号资料</h2></header>
+    <dl class="card-body form-grid account-details">
+      <div><dt>显示名称</dt><dd>{{ staffAccount.displayName }}</dd></div>
+      <div><dt>登录账号</dt><dd>{{ staffAccount.loginName }}</dd></div>
+      <div><dt>账号角色</dt><dd>{{ staffAccount.accountType === 'ADMIN' ? '管理员' : '系统负责人' }}</dd></div>
+    </dl>
+  </section>
+  <div v-else-if="loading" class="loading-state">正在加载资料…</div>
   <template v-else-if="profile">
     <div class="notice" :class="{ danger: profile.reviewStatus === 'REJECTED', success: profile.reviewStatus === 'APPROVED' }">
       <strong>审核状态：{{ { PENDING: '待审核', APPROVED: '已通过', REJECTED: '已驳回' }[profile.reviewStatus] }}</strong>
@@ -35,4 +44,20 @@ onMounted(load)
     </form></section>
   </template>
 </template>
+
+<style scoped>
+.account-details {
+  margin: 0;
+}
+
+.account-details dt {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.account-details dd {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+</style>
 
