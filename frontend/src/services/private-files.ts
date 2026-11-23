@@ -1,15 +1,24 @@
+import type { AxiosProgressEvent } from 'axios'
 import { http } from './http'
 
 /** The application token is sent only to our API, never to object storage. */
-export async function privateFileBlob(path: string): Promise<Blob> {
+export async function privateFileBlob(
+  path: string,
+  { signal, onDownloadProgress }: {
+    signal?: AbortSignal
+    onDownloadProgress?: (event: AxiosProgressEvent) => void
+  } = {},
+): Promise<Blob> {
   const endpoint = path.replace(/^\/api/, '')
-  const access = await http.get<{ data: string }>(`${endpoint}/access`)
+  const access = await http.get<{ data: string }>(`${endpoint}/access`, { signal })
   const url = access.data.data
   if (url.startsWith('/api/')) {
-    return (await http.get<Blob>(url.replace(/^\/api/, ''), { responseType: 'blob', timeout: 60_000 })).data
+    return (await http.get<Blob>(url.replace(/^\/api/, ''), {
+      responseType: 'blob', timeout: 60_000, signal, onDownloadProgress,
+    })).data
   }
   if (new URL(url).protocol !== 'https:') throw new Error('Invalid private file URL')
-  const response = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' })
+  const response = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store', signal })
   if (!response.ok) throw new Error('Private file access expired or unavailable')
   return response.blob()
 }

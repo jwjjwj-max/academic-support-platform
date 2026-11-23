@@ -10,12 +10,16 @@ describe('private files', () => {
     const blob = new Blob(['image'], { type: 'image/png' })
     vi.mocked(fetch).mockResolvedValue({ ok: true, blob: async () => blob } as Response)
     expect(await privateFileBlob('/api/materials/photos/1/file')).toBe(blob)
-    expect(fetch).toHaveBeenCalledWith('https://storage.example/file', { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store' })
+    expect(fetch).toHaveBeenCalledWith('https://storage.example/file', { credentials: 'omit', referrerPolicy: 'no-referrer', cache: 'no-store', signal: undefined })
   })
   it('uses the authorized same-origin path when direct reads are disabled', async () => {
     const blob = new Blob(['x'])
+    const signal = new AbortController().signal
+    const onDownloadProgress = vi.fn()
     vi.mocked(http.get).mockResolvedValueOnce({ data: { data: '/api/moral-files/1/file' } }).mockResolvedValueOnce({ data: blob })
-    expect(await privateFileBlob('/api/moral-files/1/file')).toBe(blob)
+    expect(await privateFileBlob('/api/moral-files/1/file', { signal, onDownloadProgress })).toBe(blob)
+    expect(http.get).toHaveBeenNthCalledWith(1, '/moral-files/1/file/access', { signal })
+    expect(http.get).toHaveBeenNthCalledWith(2, '/moral-files/1/file', { responseType: 'blob', timeout: 60_000, signal, onDownloadProgress })
     expect(fetch).not.toHaveBeenCalled()
   })
   it('reports an expired object signature', async () => {
